@@ -49,13 +49,21 @@ func main() {
 	jira := NewJiraClient(cfg.JiraBaseURL, cfg.JiraEmail, cfg.JiraAPIToken)
 	claudeRunner := NewClaudeRunner()
 
+	appMetrics := NewAppMetrics()
+
 	executor := &JobExecutor{
-		Store: store, Slack: api, Claude: claudeRunner, Jira: jira,
-		Projects: projects, Signals: signals, BotUserID: botID,
+		Store: store, Slack: api, Claude: claudeRunner,
+		Jira:      newMetricsJira(jira, appMetrics),
+		Projects:  projects, Signals: signals, BotUserID: botID,
 	}
 	worker := NewWorker(cfg.Workers, cfg.QueueSize, WorkerDeps{
-		Execute: executor.Execute,
-		Logger:  log.Printf,
+		Execute: func(ctx context.Context, j job) error {
+			start := time.Now()
+			err := executor.Execute(ctx, j)
+			appMetrics.RecordJob(j.kind(), time.Since(start))
+			return err
+		},
+		Logger: log.Printf,
 	})
 	worker.Start()
 
@@ -80,7 +88,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	go runTicker(ctx, tk)
 
-	health := NewHealthServer(HealthDeps{Store: store, Worker: worker, TriggerToken: cfg.TriggerToken, Slack: api})
+	health := NewHealthServer(HealthDeps{Store: store, Worker: worker, TriggerToken: cfg.TriggerToken, Slack: api, Metrics: appMetrics})
 	go func() {
 		addr := fmt.Sprintf(":%d", cfg.HealthPort)
 		log.Printf("health listening on %s", addr)

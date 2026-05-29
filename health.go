@@ -13,6 +13,7 @@ type HealthDeps struct {
 	Worker       *Worker
 	TriggerToken string
 	Slack        SlackAPI
+	Metrics      *AppMetrics
 }
 
 type HealthServer struct{ deps HealthDeps }
@@ -49,6 +50,9 @@ func (h *HealthServer) metrics(w http.ResponseWriter, r *http.Request) {
 		row := h.deps.Store.db.QueryRow(`SELECT COUNT(*) FROM items WHERE status = ?`, st)
 		row.Scan(&n)
 		fmt.Fprintf(w, `items_by_status{status=%q} %d`+"\n", st, n)
+	}
+	if h.deps.Metrics != nil {
+		h.deps.Metrics.WriteMetrics(w)
 	}
 }
 

@@ -161,9 +161,15 @@ type fakeJira struct {
 	createdURL string
 	comments   []struct{ Key, Text string }
 	labels     []struct{ Key, Label string }
+	failSearch bool
 }
 
-func (f *fakeJira) Search(in JiraSearchInput) ([]JiraIssue, error) { return nil, nil }
+func (f *fakeJira) Search(in JiraSearchInput) ([]JiraIssue, error) {
+	if f.failSearch {
+		return nil, fmt.Errorf("jira search error")
+	}
+	return nil, nil
+}
 func (f *fakeJira) CreateIssue(in CreateIssueInput) (*CreatedIssue, error) {
 	f.createdKey = "QORK-100"
 	f.createdURL = "https://x/browse/QORK-100"
