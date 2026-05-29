@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/slack-go/slack"
 )
@@ -40,6 +41,11 @@ func (ProposeJob) kind() string { return "propose" }
 type FileJob struct{ ProposalID int64 }
 
 func (FileJob) kind() string { return "file" }
+
+// ReminderJob queues a reminder nudge for an item.
+type ReminderJob struct{ ItemID int64 }
+
+func (ReminderJob) kind() string { return "reminder" }
 
 type Router struct {
 	Store             *Store
@@ -169,25 +175,52 @@ func normalizeCommand(text, botID string) string {
 	return strings.ToLower(strings.TrimSpace(t))
 }
 
-// Stubs — real implementations land in later tasks.
 func (r *Router) cmdStatus(it *Item, e MessageEvent) {
 	n, _ := r.Store.CountVotes(it.ID)
-	msg := fmt.Sprintf("Status: *%s* — %d/%d approvals", it.Status, n, it.ApprovalThreshold)
+	age := time.Since(it.CreatedAt).Hours() / 24
+	msg := fmt.Sprintf("*Status:* `%s` — *%d/%d* approvals, idle *%.1fd*.", it.Status, n, it.ApprovalThreshold, age)
 	r.Slack.PostMessage(e.Channel, slack.MsgOptionText(msg, false), slack.MsgOptionTS(it.SlackTS))
 }
-func (r *Router) cmdHelp(it *Item, e MessageEvent)               { r.postHelp(e) }
-func (r *Router) cmdCancel(it *Item, e MessageEvent)             { r.Store.UpdateItemStatus(it.ID, "cancelled"); r.Slack.AddReaction("wastebasket", slackItem(it.SlackChannel, it.SlackTS)) }
-func (r *Router) cmdFileNow(it *Item, e MessageEvent)            { /* Task 23 */ }
+
+func (r *Router) cmdHelp(it *Item, e MessageEvent) {
+	r.Slack.PostMessage(e.Channel, slack.MsgOptionText(helpText, false), slack.MsgOptionTS(it.SlackTS))
+}
+
+const helpText = "*deferred-work-bot commands:*\n" +
+	"• `@bot status` — show votes + idle time\n" +
+	"• `@bot cancel` — withdraw item\n" +
+	"• `@bot regen` — re-draft proposal with latest thread context\n" +
+	"• `@bot project: <name>` — override sub-project label\n" +
+	"• `@bot priority: <low|medium|high>` — override priority\n" +
+	"• `@bot file now` — skip approval gate; propose immediately\n" +
+	"• `@bot search` — re-run related-ticket search\n" +
+	"• `@bot help` — this message\n" +
+	"• `@bot <question>` — free-form question about this item"
+
+func (r *Router) cmdCancel(it *Item, e MessageEvent) {
+	if err := r.Store.UpdateItemStatus(it.ID, "cancelled"); err != nil {
+		return
+	}
+	r.Store.LogEvent(&it.ID, "cancel", `{"by":"`+e.User+`","via":"@bot cancel"}`)
+	r.Slack.AddReaction("wastebasket", slackItem(it.SlackChannel, it.SlackTS))
+}
+
+func (r *Router) cmdFileNow(it *Item, e MessageEvent) {
+	if it.Status != "collecting" {
+		return
+	}
+	r.Store.UpdateItemStatus(it.ID, "proposing")
+	r.Store.LogEvent(&it.ID, "advanced", `{"reason":"file_now","by":"`+e.User+`"}`)
+	if r.Worker != nil {
+		r.Worker.Submit(ProposeJob{ItemID: it.ID})
+	}
+}
+
 func (r *Router) cmdRegen(it *Item, e MessageEvent)              { /* Task 24 */ }
 func (r *Router) cmdSearch(it *Item, e MessageEvent)             { /* Task 24 */ }
 func (r *Router) cmdProject(it *Item, e MessageEvent, v string)  { r.Store.UpdateItemSubproject(it.ID, v); r.Slack.AddReaction("white_check_mark", slackItem(e.Channel, e.TS)) }
 func (r *Router) cmdPriority(it *Item, e MessageEvent, v string) { /* Task 24 */ }
 func (r *Router) cmdFreeform(it *Item, e MessageEvent, q string) { /* Task 25 */ }
-
-func (r *Router) postHelp(e MessageEvent) {
-	help := "*Commands:* `status`, `cancel`, `regen`, `project: <name>`, `priority: <low|med|high>`, `file now`, `search`, `help`, or any free-form question."
-	r.Slack.PostMessage(e.Channel, slack.MsgOptionText(help, false), slack.MsgOptionTS(e.ThreadTS))
-}
 
 func (r *Router) handleResolution(it *Item, p *Proposal, keyword string, e MessageEvent) {
 	var branch string

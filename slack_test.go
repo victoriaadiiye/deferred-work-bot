@@ -308,6 +308,36 @@ func TestRouter_ResolutionNewKeyword(t *testing.T) {
 	}
 }
 
+func TestCmdStatus_ReportsCounts(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{ApproveReactions: []string{"white_check_mark"}}, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	r.HandleReactionAdded(ReactionEvent{User: "U2", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U3", Text: "<@UBOT> status"})
+	if len(fake.posted) == 0 {
+		t.Fatal("expected status reply")
+	}
+}
+
+func TestCmdFileNow_TransitionsToProposing(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	w := &Worker{queue: make(chan job, 1)}
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3, Worker: w}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> file now"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	if it.Status != "proposing" {
+		t.Fatalf("status: %s", it.Status)
+	}
+	select {
+	case <-w.queue:
+	default:
+		t.Fatal("expected ProposeJob enqueued")
+	}
+}
+
 func TestRouter_ResolutionCommentKeyword(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
