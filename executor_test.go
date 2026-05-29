@@ -89,6 +89,76 @@ func TestJobExecutor_FileFlow_RedraftsWhenBranchChangedFromAwaitingResolution(t 
 	}
 }
 
+func TestJobExecutor_ReminderFlow_PostsReminder(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "reminder test item", Status: "collecting", ApprovalThreshold: 3}
+	store.InsertItem(it)
+	store.UpsertVote(it.ID, "U2", "reaction", "white_check_mark")
+	store.UpsertVote(it.ID, "U3", "reaction", "white_check_mark")
+
+	ex := &JobExecutor{
+		Store: store, Slack: fake, Jira: &fakeJira{},
+		Projects: &ProjectsConfig{}, Signals: &SignalsConfig{},
+		BotUserID: "UBOT",
+	}
+	if err := ex.Execute(context.Background(), ReminderJob{ItemID: it.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A message should have been posted into the thread.
+	if len(fake.posted) == 0 {
+		t.Fatal("expected reminder message posted")
+	}
+	msg := fake.posted[0]
+	if msg.Channel != "C1" {
+		t.Fatalf("channel: %s", msg.Channel)
+	}
+	if !strings.Contains(msg.Text, "2/3") {
+		t.Fatalf("expected vote count in message: %s", msg.Text)
+	}
+	if !strings.Contains(msg.Text, "reminder test item") {
+		t.Fatalf("expected quoted original message: %s", msg.Text)
+	}
+
+	// LastReminderAt should be updated.
+	got, _ := store.GetItemByID(it.ID)
+	if got.LastReminderAt == nil {
+		t.Fatal("expected LastReminderAt to be set")
+	}
+
+	// A reminder event with via=trigger should be logged.
+	events, _ := store.ListEventsForItem(it.ID)
+	found := false
+	for _, ev := range events {
+		if ev.Kind == "reminder" && strings.Contains(ev.Payload, `"via":"trigger"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected reminder event with via=trigger")
+	}
+}
+
+func TestJobExecutor_ReminderFlow_SkipsTerminal(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "ticketed", ApprovalThreshold: 3}
+	store.InsertItem(it)
+
+	ex := &JobExecutor{
+		Store: store, Slack: fake, Jira: &fakeJira{},
+		Projects: &ProjectsConfig{}, Signals: &SignalsConfig{},
+		BotUserID: "UBOT",
+	}
+	if err := ex.Execute(context.Background(), ReminderJob{ItemID: it.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.posted) != 0 {
+		t.Fatalf("expected no message for terminal item, got %d", len(fake.posted))
+	}
+}
+
 func TestJobExecutor_FileFlow_CreatesIssueAndLocks(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")

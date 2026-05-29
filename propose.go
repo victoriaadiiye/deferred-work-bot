@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/slack-go/slack"
 )
@@ -516,9 +517,32 @@ func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {
 	return nil
 }
 
-func (e *JobExecutor) executeReminder(ctx context.Context, itemID int64) error {
-	// Reminder posting is driven by the ticker; this is reserved for manual triggers.
+// postReminder posts a reminder message to the item's thread and updates
+// LastReminderAt. It is called both by the ticker (via remind) and by
+// executeReminder for manual /trigger?action=reminder requests.
+func postReminder(store *Store, slackAPI SlackAPI, it *Item, via string) error {
+	n, _ := store.CountVotes(it.ID)
+	now := time.Now()
+	age := now.Sub(it.CreatedAt).Hours() / 24
+	body := fmt.Sprintf("Still pending — *%d/%d* approvals, *%.1fd* idle. Original:\n> %s",
+		n, it.ApprovalThreshold, age, truncate(it.Text, 200))
+	slackAPI.PostMessage(it.SlackChannel,
+		slack.MsgOptionText(body, false),
+		slack.MsgOptionTS(it.SlackTS))
+	store.UpdateItemReminderTimes(it.ID, &now, it.WarningPostedAt)
+	store.LogEvent(&it.ID, "reminder", `{"via":"`+via+`"}`)
 	return nil
+}
+
+func (e *JobExecutor) executeReminder(ctx context.Context, itemID int64) error {
+	it, err := e.Store.GetItemByID(itemID)
+	if err != nil {
+		return err
+	}
+	if isTerminal(it.Status) {
+		return nil
+	}
+	return postReminder(e.Store, e.Slack, it, "trigger")
 }
 
 func buildExistingTicketComment(original, descPreview string) string {
