@@ -195,6 +195,42 @@ func ensureLabels(labels []string, required ...string) []string {
 	return out
 }
 
+// RenderProposalMessage builds the Slack message body for a deferred-work proposal.
+func RenderProposalMessage(d *Draft, rels []RelatedTicket, branch, existingKey string, ttlTriggered bool) string {
+	var b strings.Builder
+	if ttlTriggered {
+		b.WriteString(":warning: *no response from team in 3 days — proposing anyway*\n\n")
+	}
+	if branch == "awaiting_resolution" {
+		fmt.Fprintf(&b, "*Existing ticket may cover this:* <%s|%s> (encompassed).\n\n", existingKey, existingKey)
+		b.WriteString("Reply `comment` to add a follow-up to the existing ticket, `new` to file a fresh one, or `both` for both.\n")
+		return b.String()
+	}
+	if d != nil {
+		fmt.Fprintf(&b, "*Proposed ticket — %s (%s)*\n", d.IssueType, d.Priority)
+		fmt.Fprintf(&b, "*Summary:* %s\n", d.Summary)
+		if d.Description != "" {
+			desc := d.Description
+			if len(desc) > 600 {
+				desc = desc[:600] + "…"
+			}
+			fmt.Fprintf(&b, "*Description preview:*\n```\n%s\n```\n", desc)
+		}
+		fmt.Fprintf(&b, "*Labels:* %s\n", strings.Join(d.Labels, ", "))
+	}
+	if len(rels) > 0 {
+		b.WriteString("\n*Related tickets:*\n")
+		for _, r := range rels {
+			if r.Verdict == "unrelated" {
+				continue
+			}
+			fmt.Fprintf(&b, "• <%s|%s> — %s\n", r.Key, r.Key, r.Verdict)
+		}
+	}
+	b.WriteString("\n_React with any approve signal to file. `@bot regen` to revise._")
+	return b.String()
+}
+
 // DecideBranch picks the proposal branch from related-ticket classifications.
 // Returns (branch, existingKey). existingKey is set only when branch == "awaiting_resolution".
 func DecideBranch(rels []RelatedTicket) (string, string) {

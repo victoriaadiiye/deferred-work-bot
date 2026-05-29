@@ -121,6 +121,41 @@ func TestDraftTicket_PriorityOverride(t *testing.T) {
 	}
 }
 
+func TestRenderProposalMessage_NewBranch(t *testing.T) {
+	d := &Draft{
+		Summary:     "Fix flaky test",
+		Description: "long...",
+		IssueType:   "Task",
+		Labels:      []string{"deferred-work", "qompass"},
+		Priority:    "Medium",
+	}
+	out := RenderProposalMessage(d, []RelatedTicket{}, "new", "", false)
+	if !strings.Contains(out, "Fix flaky test") || !strings.Contains(out, "Task") || !strings.Contains(out, "Medium") {
+		t.Fatalf("missing fields:\n%s", out)
+	}
+	if !strings.Contains(out, "approve signal to file") {
+		t.Fatalf("missing footer:\n%s", out)
+	}
+}
+
+func TestRenderProposalMessage_EncompassedBranch(t *testing.T) {
+	out := RenderProposalMessage(nil, []RelatedTicket{{Key: "QORK-5", Verdict: "encompassed"}}, "awaiting_resolution", "QORK-5", false)
+	if !strings.Contains(out, "QORK-5") || !strings.Contains(out, "encompassed") {
+		t.Fatalf("missing encompassed banner: %s", out)
+	}
+	if !strings.Contains(out, "comment") || !strings.Contains(out, "new") || !strings.Contains(out, "both") {
+		t.Fatalf("missing resolution options: %s", out)
+	}
+}
+
+func TestRenderProposalMessage_TTLBanner(t *testing.T) {
+	d := &Draft{Summary: "x", IssueType: "Task", Priority: "Low"}
+	out := RenderProposalMessage(d, nil, "new", "", true)
+	if !strings.Contains(out, "no response") {
+		t.Fatalf("missing TTL banner: %s", out)
+	}
+}
+
 func TestDecideBranch(t *testing.T) {
 	cases := []struct {
 		name     string
