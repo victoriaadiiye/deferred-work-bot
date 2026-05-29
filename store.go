@@ -45,12 +45,23 @@ CREATE TABLE IF NOT EXISTS items (
 CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
 `
 
+const schemaVotes = `
+CREATE TABLE IF NOT EXISTS votes (
+  item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  user_slack_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  signal TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (item_id, user_slack_id)
+);
+`
+
 func OpenStore(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(schemaItems); err != nil {
+	if _, err := db.Exec(schemaItems + schemaVotes); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -137,3 +148,31 @@ func scanItem(r rowScanner) (*Item, error) {
 func scanItemRows(r *sql.Rows) (*Item, error) { return scanItem(r) }
 
 var ErrNotFound = errors.New("not found")
+
+func (s *Store) UpsertVote(itemID int64, user, source, signal string) error {
+	_, err := s.db.Exec(`INSERT INTO votes(item_id, user_slack_id, source, signal) VALUES(?,?,?,?)
+		ON CONFLICT(item_id, user_slack_id) DO NOTHING`, itemID, user, source, signal)
+	return err
+}
+
+func (s *Store) RemoveVote(itemID int64, user string) error {
+	_, err := s.db.Exec(`DELETE FROM votes WHERE item_id = ? AND user_slack_id = ?`, itemID, user)
+	return err
+}
+
+func (s *Store) CountVotes(itemID int64) (int, error) {
+	row := s.db.QueryRow(`SELECT COUNT(*) FROM votes WHERE item_id = ?`, itemID)
+	var n int
+	err := row.Scan(&n)
+	return n, err
+}
+
+func (s *Store) HasVoted(itemID int64, user string) (bool, error) {
+	row := s.db.QueryRow(`SELECT 1 FROM votes WHERE item_id = ? AND user_slack_id = ?`, itemID, user)
+	var v int
+	err := row.Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}

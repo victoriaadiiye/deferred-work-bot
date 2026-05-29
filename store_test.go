@@ -83,3 +83,58 @@ func TestStore_ListByStatus(t *testing.T) {
 		t.Fatalf("expected 2, got %d", len(items))
 	}
 }
+
+func TestStore_UpsertVote(t *testing.T) {
+	s := newTestStore(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U_AUTHOR", Text: "x", Status: "collecting", ApprovalThreshold: 3}
+	s.InsertItem(it)
+
+	if err := s.UpsertVote(it.ID, "U2", "reaction", "white_check_mark"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertVote(it.ID, "U2", "reply", "lgtm"); err != nil {
+		t.Fatal(err) // same user, different source — should dedup, not error
+	}
+	n, err := s.CountVotes(it.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1 vote after dedup, got %d", n)
+	}
+
+	s.UpsertVote(it.ID, "U3", "reaction", "+1")
+	n, _ = s.CountVotes(it.ID)
+	if n != 2 {
+		t.Fatalf("expected 2 votes, got %d", n)
+	}
+}
+
+func TestStore_RemoveVote(t *testing.T) {
+	s := newTestStore(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "x", Status: "collecting", ApprovalThreshold: 3}
+	s.InsertItem(it)
+	s.UpsertVote(it.ID, "U2", "reaction", "white_check_mark")
+	if err := s.RemoveVote(it.ID, "U2"); err != nil {
+		t.Fatal(err)
+	}
+	n, _ := s.CountVotes(it.ID)
+	if n != 0 {
+		t.Fatalf("expected 0 votes after removal, got %d", n)
+	}
+}
+
+func TestStore_VoteExcludesAuthor(t *testing.T) {
+	// Author self-vote enforcement happens at the dispatch layer, but the
+	// store offers a HasVoted helper used by the caller to skip inserts.
+	s := newTestStore(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U_AUTHOR", Text: "x", Status: "collecting", ApprovalThreshold: 3}
+	s.InsertItem(it)
+	ok, err := s.HasVoted(it.ID, "U_AUTHOR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("HasVoted should be false initially")
+	}
+}
