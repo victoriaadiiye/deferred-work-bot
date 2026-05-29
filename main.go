@@ -132,13 +132,30 @@ func handleEventsAPI(r *Router, e slackevents.EventsAPIEvent) {
 	case slackevents.CallbackEvent:
 		switch ev := e.InnerEvent.Data.(type) {
 		case *slackevents.MessageEvent:
-			r.HandleMessage(MessageEvent{
-				Channel:  ev.Channel,
-				TS:       ev.TimeStamp,
-				ThreadTS: ev.ThreadTimeStamp,
-				User:     ev.User,
-				Text:     ev.Text,
-			})
+			switch ev.SubType {
+			case "message_deleted":
+				r.HandleMessageDeleted(MessageEvent{
+					Channel: ev.Channel,
+					TS:      ev.DeletedTimeStamp,
+				})
+			case "message_changed":
+				if ev.Message != nil {
+					r.HandleMessageChanged(MessageEvent{
+						Channel: ev.Channel,
+						TS:      ev.Message.Timestamp,
+						Text:    ev.Message.Text,
+						User:    ev.Message.User,
+					})
+				}
+			default:
+				r.HandleMessage(MessageEvent{
+					Channel:  ev.Channel,
+					TS:       ev.TimeStamp,
+					ThreadTS: ev.ThreadTimeStamp,
+					User:     ev.User,
+					Text:     ev.Text,
+				})
+			}
 		case *slackevents.AppMentionEvent:
 			r.HandleAppMention(MessageEvent{
 				Channel:  ev.Channel,
