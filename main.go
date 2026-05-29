@@ -80,7 +80,7 @@ func main() {
 	}
 
 	tk := &Ticker{
-		Store: store, Slack: api,
+		Store: store, Slack: api, Worker: worker,
 		ReminderEvery: time.Duration(cfg.ReminderIntervalDays) * 24 * time.Hour,
 		WarnAt:        time.Duration(cfg.WarningAtDays) * 24 * time.Hour,
 		ArchiveAt:     time.Duration(cfg.WarningAtDays+cfg.ArchiveGraceDays) * 24 * time.Hour,

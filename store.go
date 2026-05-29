@@ -356,6 +356,25 @@ func (s *Store) UpdateItemReminderTimes(id int64, lastReminder, warning *time.Ti
 	return err
 }
 
+// ListItemsByStatusOlderThan returns items with the given status whose
+// updated_at is older than the cutoff time.
+func (s *Store) ListItemsByStatusOlderThan(status string, cutoff time.Time) ([]*Item, error) {
+	rows, err := s.db.Query(`SELECT id, slack_channel, slack_ts, author_slack_id, text, subproject, status, approval_threshold, last_reminder_at, warning_posted_at, created_at, updated_at FROM items WHERE status = ? AND updated_at < ? ORDER BY created_at`, status, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Item
+	for rows.Next() {
+		it, err := scanItemRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) UpdateItemSubproject(id int64, sub string) error {
 	_, err := s.db.Exec(`UPDATE items SET subproject = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, sub, id)
 	return err

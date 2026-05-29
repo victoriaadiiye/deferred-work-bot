@@ -71,6 +71,71 @@ func TestTicker_ArchivesAt13Days(t *testing.T) {
 	}
 }
 
+func TestTicker_RetriesStuckProposing(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	w := &Worker{queue: make(chan job, 4)}
+	now := time.Now()
+
+	// Item stuck in "proposing" for 45 minutes — beyond the 30-minute threshold.
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "proposing", ApprovalThreshold: 3}
+	store.InsertItem(it)
+	stuckAt := now.Add(-45 * time.Minute)
+	store.db.Exec(`UPDATE items SET updated_at = ? WHERE id = ?`, stuckAt, it.ID)
+
+	tk := &Ticker{
+		Store: store, Slack: fake, Worker: w,
+		ReminderEvery: 3 * 24 * time.Hour,
+		WarnAt:        10 * 24 * time.Hour,
+		ArchiveAt:     13 * 24 * time.Hour,
+		Now:           func() time.Time { return now },
+	}
+	tk.Tick(context.Background())
+
+	// A ProposeJob should have been enqueued.
+	select {
+	case j := <-w.queue:
+		pj, ok := j.(ProposeJob)
+		if !ok {
+			t.Fatalf("expected ProposeJob, got %T", j)
+		}
+		if pj.ItemID != it.ID {
+			t.Fatalf("expected itemID %d, got %d", it.ID, pj.ItemID)
+		}
+	default:
+		t.Fatal("expected ProposeJob to be re-enqueued for stuck item")
+	}
+}
+
+func TestTicker_DoesNotRetryRecentlyProposing(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	w := &Worker{queue: make(chan job, 4)}
+	now := time.Now()
+
+	// Item in "proposing" for only 5 minutes — below the threshold.
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "proposing", ApprovalThreshold: 3}
+	store.InsertItem(it)
+	recentAt := now.Add(-5 * time.Minute)
+	store.db.Exec(`UPDATE items SET updated_at = ? WHERE id = ?`, recentAt, it.ID)
+
+	tk := &Ticker{
+		Store: store, Slack: fake, Worker: w,
+		ReminderEvery: 3 * 24 * time.Hour,
+		WarnAt:        10 * 24 * time.Hour,
+		ArchiveAt:     13 * 24 * time.Hour,
+		Now:           func() time.Time { return now },
+	}
+	tk.Tick(context.Background())
+
+	select {
+	case <-w.queue:
+		t.Fatal("should not have re-enqueued recently-proposing item")
+	default:
+		// expected: no job
+	}
+}
+
 func TestTicker_NewVotesAfterWarningRevertsLifecycle(t *testing.T) {
 	// If vote count >= threshold, the propose advancement happens elsewhere (router).
 	// Ticker's contract: do not archive if proposal/ticket has been moved past 'collecting'.

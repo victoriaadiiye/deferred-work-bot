@@ -8,9 +8,14 @@ import (
 	"github.com/slack-go/slack"
 )
 
+// stuckProposingThreshold is the minimum duration an item must have been in
+// status=proposing before the ticker re-enqueues it as a ProposeJob.
+const stuckProposingThreshold = 30 * time.Minute
+
 type Ticker struct {
 	Store         *Store
 	Slack         SlackAPI
+	Worker        *Worker
 	ReminderEvery time.Duration
 	WarnAt        time.Duration
 	ArchiveAt     time.Duration
@@ -35,6 +40,18 @@ func (t *Ticker) Tick(ctx context.Context) {
 		}
 		if t.shouldRemind(it, age, now) {
 			t.remind(it, now)
+		}
+	}
+
+	// Re-enqueue any items stuck in proposing for longer than the threshold.
+	cutoff := now.Add(-stuckProposingThreshold)
+	stuck, err := t.Store.ListItemsByStatusOlderThan("proposing", cutoff)
+	if err != nil {
+		return
+	}
+	for _, it := range stuck {
+		if t.Worker != nil {
+			t.Worker.Submit(ProposeJob{ItemID: it.ID})
 		}
 	}
 }
