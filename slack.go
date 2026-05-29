@@ -274,6 +274,30 @@ func slackItem(channel, ts string) slack.ItemRef {
 	return slack.ItemRef{Channel: channel, Timestamp: ts}
 }
 
+func (r *Router) HandleMessageDeleted(e MessageEvent) {
+	it, err := r.Store.GetItemByTS(e.Channel, e.TS)
+	if err != nil {
+		return
+	}
+	if isTerminal(it.Status) {
+		return
+	}
+	r.Store.UpdateItemStatus(it.ID, "cancelled")
+	r.Store.LogEvent(&it.ID, "cancel", `{"reason":"message_deleted"}`)
+}
+
+func (r *Router) HandleMessageChanged(e MessageEvent) {
+	it, err := r.Store.GetItemByTS(e.Channel, e.TS)
+	if err != nil {
+		return
+	}
+	if isTerminal(it.Status) {
+		return
+	}
+	r.Store.UpdateItemText(it.ID, e.Text)
+	r.Store.LogEvent(&it.ID, "edited", "{}")
+}
+
 func (r *Router) HandleAppMention(e MessageEvent) {
 	if e.User == r.BotUserID || e.User == "" {
 		return

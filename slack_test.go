@@ -267,3 +267,27 @@ func TestRouter_AppMentionInThreadDispatchesCommand(t *testing.T) {
 		t.Fatal("expected status reply")
 	}
 }
+
+func TestRouter_MessageDeletedCancels(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	r.HandleMessageDeleted(MessageEvent{Channel: "C1", TS: "1700.1"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	if it.Status != "cancelled" {
+		t.Fatalf("expected cancelled, got %s", it.Status)
+	}
+}
+
+func TestRouter_MessageEditedUpdatesText(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "original"})
+	r.HandleMessageChanged(MessageEvent{Channel: "C1", TS: "1700.1", Text: "edited text", User: "U_AUTHOR"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	if it.Text != "edited text" {
+		t.Fatalf("text not updated: %s", it.Text)
+	}
+}
