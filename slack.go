@@ -216,10 +216,48 @@ func (r *Router) cmdFileNow(it *Item, e MessageEvent) {
 	}
 }
 
-func (r *Router) cmdRegen(it *Item, e MessageEvent)              { /* Task 24 */ }
-func (r *Router) cmdSearch(it *Item, e MessageEvent)             { /* Task 24 */ }
-func (r *Router) cmdProject(it *Item, e MessageEvent, v string)  { r.Store.UpdateItemSubproject(it.ID, v); r.Slack.AddReaction("white_check_mark", slackItem(e.Channel, e.TS)) }
-func (r *Router) cmdPriority(it *Item, e MessageEvent, v string) { /* Task 24 */ }
+func (r *Router) cmdRegen(it *Item, e MessageEvent) {
+	if p, err := r.Store.GetLatestProposal(it.ID); err == nil {
+		r.Store.UpdateProposalStatus(p.ID, "rejected")
+	}
+	if it.Status != "proposed" && it.Status != "proposing" {
+		r.Store.UpdateItemStatus(it.ID, "proposing")
+	}
+	r.Store.LogEvent(&it.ID, "regen", `{"by":"`+e.User+`"}`)
+	if r.Worker != nil {
+		r.Worker.Submit(ProposeJob{ItemID: it.ID})
+	}
+}
+
+func (r *Router) cmdSearch(it *Item, e MessageEvent) {
+	// Same as regen but only re-runs Jira search portion; for v1 we just submit
+	// a ProposeJob — the worker will redo search as part of the flow.
+	r.cmdRegen(it, e)
+}
+
+func (r *Router) cmdProject(it *Item, e MessageEvent, v string) {
+	value := strings.ToLower(strings.TrimSpace(v))
+	if value == "" {
+		return
+	}
+	r.Store.UpdateItemSubproject(it.ID, value)
+	r.Store.LogEvent(&it.ID, "project_override", `{"value":"`+value+`","by":"`+e.User+`"}`)
+	r.Slack.AddReaction("white_check_mark", slackItem(e.Channel, e.TS))
+}
+
+func (r *Router) cmdPriority(it *Item, e MessageEvent, v string) {
+	value := strings.ToLower(strings.TrimSpace(v))
+	switch value {
+	case "low", "medium", "med", "high":
+	default:
+		return
+	}
+	if value == "med" {
+		value = "medium"
+	}
+	r.Store.LogEvent(&it.ID, "priority_override", `{"value":"`+value+`","by":"`+e.User+`"}`)
+	r.Slack.AddReaction("white_check_mark", slackItem(e.Channel, e.TS))
+}
 func (r *Router) cmdFreeform(it *Item, e MessageEvent, q string) { /* Task 25 */ }
 
 func (r *Router) handleResolution(it *Item, p *Proposal, keyword string, e MessageEvent) {

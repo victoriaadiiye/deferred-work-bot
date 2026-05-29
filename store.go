@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -343,4 +344,22 @@ func (s *Store) UpdateItemText(id int64, text string) error {
 func (s *Store) UpdateProposalBranch(id int64, branch, status string) error {
 	_, err := s.db.Exec(`UPDATE proposals SET branch = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, branch, status, id)
 	return err
+}
+
+func (s *Store) LatestOverride(itemID int64, kind string) (string, error) {
+	row := s.db.QueryRow(`SELECT payload_json FROM events WHERE item_id = ? AND kind = ? ORDER BY id DESC LIMIT 1`, itemID, kind)
+	var p string
+	err := row.Scan(&p)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	// payload is {"value":"...", "by":"..."}
+	var parsed struct {
+		Value string `json:"value"`
+	}
+	_ = json.Unmarshal([]byte(p), &parsed)
+	return parsed.Value, nil
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"sync"
 	"testing"
 
@@ -335,6 +336,59 @@ func TestCmdFileNow_TransitionsToProposing(t *testing.T) {
 	case <-w.queue:
 	default:
 		t.Fatal("expected ProposeJob enqueued")
+	}
+}
+
+func TestCmdProject_UpdatesSubproject(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> project: qatalyst"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	if it.Subproject != "qatalyst" {
+		t.Fatalf("subproject: %s", it.Subproject)
+	}
+}
+
+func TestCmdPriority_SavedAsLatestOverride(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> priority: high"})
+	// Priority override stored via event log; verify it was logged.
+	events, _ := store.ListEventsForItem(1)
+	found := false
+	for _, ev := range events {
+		if ev.Kind == "priority_override" && strings.Contains(ev.Payload, "high") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected priority_override event")
+	}
+}
+
+func TestCmdRegen_EnqueuesProposeJob(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	w := &Worker{queue: make(chan job, 1)}
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3, Worker: w}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	store.UpdateItemStatus(it.ID, "proposed")
+	store.InsertProposal(&Proposal{ItemID: it.ID, SlackTS: "1700.x", DraftJSON: "{}", RelatedTicketsJSON: "[]", Branch: "new", Status: "draft"})
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> regen"})
+	select {
+	case <-w.queue:
+	default:
+		t.Fatal("expected ProposeJob enqueued")
+	}
+	// Old proposal marked rejected.
+	p, _ := store.GetLatestProposal(it.ID)
+	if p.Status != "rejected" {
+		t.Fatalf("old proposal status: %s", p.Status)
 	}
 }
 
