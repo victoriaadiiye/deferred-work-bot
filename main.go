@@ -91,7 +91,11 @@ func main() {
 	// Socket Mode event loop.
 	sm := socketmode.New(api)
 	go runSocketMode(ctx, sm, router)
-	go func() { sm.Run() }()
+	go func() {
+		if err := sm.RunContext(ctx); err != nil && ctx.Err() == nil {
+			log.Printf("socketmode: %v", err)
+		}
+	}()
 
 	// Wait for signal.
 	sig := make(chan os.Signal, 1)
@@ -118,15 +122,23 @@ func runTicker(ctx context.Context, tk *Ticker) {
 }
 
 func runSocketMode(ctx context.Context, sm *socketmode.Client, r *Router) {
-	for evt := range sm.Events {
-		switch evt.Type {
-		case socketmode.EventTypeEventsAPI:
-			payload, ok := evt.Data.(slackevents.EventsAPIEvent)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt, ok := <-sm.Events:
 			if !ok {
-				continue
+				return
 			}
-			sm.Ack(*evt.Request)
-			handleEventsAPI(r, payload)
+			switch evt.Type {
+			case socketmode.EventTypeEventsAPI:
+				payload, ok := evt.Data.(slackevents.EventsAPIEvent)
+				if !ok {
+					continue
+				}
+				sm.Ack(*evt.Request)
+				handleEventsAPI(r, payload)
+			}
 		}
 	}
 }
