@@ -1,0 +1,96 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
+)
+
+type Config struct {
+	SlackAppToken        string
+	SlackBotToken        string
+	WatchedChannels      []string
+	JiraBaseURL          string
+	JiraEmail            string
+	JiraAPIToken         string
+	JiraQORKProjects     []string
+	ApprovalThreshold    int
+	ReminderIntervalDays int
+	WarningAtDays        int
+	ArchiveGraceDays     int
+	Workers              int
+	QueueSize            int
+	SQLitePath           string
+	HealthPort           int
+	TriggerToken         string // optional shared token for POST /trigger
+}
+
+func LoadConfig() (*Config, error) {
+	required := []string{
+		"SLACK_APP_TOKEN", "SLACK_BOT_TOKEN", "WATCHED_CHANNELS",
+		"JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_QORK_PROJECTS",
+	}
+	var missing []string
+	for _, k := range required {
+		if os.Getenv(k) == "" {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("missing required env vars: %s", strings.Join(missing, ","))
+	}
+	c := &Config{
+		SlackAppToken:        os.Getenv("SLACK_APP_TOKEN"),
+		SlackBotToken:        os.Getenv("SLACK_BOT_TOKEN"),
+		WatchedChannels:      splitCSV(os.Getenv("WATCHED_CHANNELS")),
+		JiraBaseURL:          strings.TrimRight(os.Getenv("JIRA_BASE_URL"), "/"),
+		JiraEmail:            os.Getenv("JIRA_EMAIL"),
+		JiraAPIToken:         os.Getenv("JIRA_API_TOKEN"),
+		JiraQORKProjects:     splitCSV(os.Getenv("JIRA_QORK_PROJECTS")),
+		ApprovalThreshold:    intEnv("APPROVAL_THRESHOLD", 3),
+		ReminderIntervalDays: intEnv("REMINDER_INTERVAL_DAYS", 3),
+		WarningAtDays:        intEnv("WARNING_AT_DAYS", 10),
+		ArchiveGraceDays:     intEnv("ARCHIVE_GRACE_DAYS", 3),
+		Workers:              intEnv("WORKERS", 2),
+		QueueSize:            intEnv("QUEUE_SIZE", 64),
+		SQLitePath:           defaultStr(os.Getenv("SQLITE_PATH"), "/data/state.db"),
+		HealthPort:           intEnv("HEALTH_PORT", 8080),
+		TriggerToken:         os.Getenv("TRIGGER_TOKEN"),
+	}
+	if len(c.WatchedChannels) == 0 {
+		return nil, errors.New("WATCHED_CHANNELS empty after parse")
+	}
+	return c, nil
+}
+
+func splitCSV(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func intEnv(k string, def int) int {
+	v := os.Getenv(k)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return n
+}
+
+func defaultStr(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
