@@ -72,3 +72,45 @@ func TestLoadConfig_Defaults(t *testing.T) {
 		t.Fatalf("default pool/server wrong: %+v", c)
 	}
 }
+
+func TestLoadProjects(t *testing.T) {
+	tmp := t.TempDir() + "/projects.yaml"
+	os.WriteFile(tmp, []byte(`subprojects:
+  - qompass
+  - qatalyst
+qork_projects:
+  - QORK
+`), 0o644)
+	p, err := LoadProjects(tmp)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(p.Subprojects) != 2 || p.Subprojects[0] != "qompass" {
+		t.Fatalf("subprojects wrong: %+v", p)
+	}
+}
+
+func TestLoadSignals(t *testing.T) {
+	tmp := t.TempDir() + "/signals.yaml"
+	os.WriteFile(tmp, []byte(`approve_reactions:
+  - white_check_mark
+  - claude-it
+approve_replies:
+  - approve
+  - lgtm
+cancel_reactions:
+  - x
+cancel_replies:
+  - cancel
+`), 0o644)
+	s, err := LoadSignals(tmp)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(s.ApproveReactions) != 2 || s.ApproveReactions[1] != "claude-it" {
+		t.Fatalf("approve reactions wrong: %+v", s)
+	}
+	if len(s.CancelReplies) != 1 || s.CancelReplies[0] != "cancel" {
+		t.Fatalf("cancel replies wrong: %+v", s)
+	}
+}

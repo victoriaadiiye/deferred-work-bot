@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	yaml "gopkg.in/yaml.v3"
 )
 
 type Config struct {
@@ -93,4 +95,40 @@ func defaultStr(v, def string) string {
 		return def
 	}
 	return v
+}
+
+type ProjectsConfig struct {
+	Subprojects  []string `yaml:"subprojects"`
+	QORKProjects []string `yaml:"qork_projects"`
+}
+
+type SignalsConfig struct {
+	ApproveReactions []string `yaml:"approve_reactions"`
+	ApproveReplies   []string `yaml:"approve_replies"`
+	CancelReactions  []string `yaml:"cancel_reactions"`
+	CancelReplies    []string `yaml:"cancel_replies"`
+}
+
+func LoadProjects(path string) (*ProjectsConfig, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var p ProjectsConfig
+	if err := yaml.Unmarshal(b, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func LoadSignals(path string) (*SignalsConfig, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var s SignalsConfig
+	if err := yaml.Unmarshal(b, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
 }

@@ -1,0 +1,14 @@
+approve_reactions:
+  - white_check_mark
+  - claude-it
+  - "+1"
+  - thumbsup
+approve_replies:
+  - approve
+  - approved
+  - "+1"
+  - lgtm
+cancel_reactions:
+  - x
+cancel_replies:
+  - cancel
