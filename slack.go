@@ -216,6 +216,9 @@ func (r *Router) cmdProject(it *Item, e MessageEvent, v string) {
 	r.Store.UpdateItemSubproject(it.ID, value)
 	r.Store.LogEvent(&it.ID, "project_override", `{"value":"`+value+`","by":"`+e.User+`"}`)
 	r.Slack.AddReaction("white_check_mark", slackItem(e.Channel, e.TS))
+	if it.Status == "proposed" {
+		r.cmdRegen(it, e)
+	}
 }
 
 func (r *Router) cmdPriority(it *Item, e MessageEvent, v string) {
@@ -230,6 +233,9 @@ func (r *Router) cmdPriority(it *Item, e MessageEvent, v string) {
 	}
 	r.Store.LogEvent(&it.ID, "priority_override", `{"value":"`+value+`","by":"`+e.User+`"}`)
 	r.Slack.AddReaction("white_check_mark", slackItem(e.Channel, e.TS))
+	if it.Status == "proposed" {
+		r.cmdRegen(it, e)
+	}
 }
 func (r *Router) cmdFreeform(it *Item, e MessageEvent, q string) {
 	if r.Claude == nil {

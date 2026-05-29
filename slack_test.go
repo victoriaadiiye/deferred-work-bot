@@ -380,6 +380,60 @@ func TestCmdPriority_SavedAsLatestOverride(t *testing.T) {
 	}
 }
 
+func TestCmdProject_TriggersRegenOnProposedItem(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	w := &Worker{queue: make(chan job, 4)}
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3, Worker: w}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	store.UpdateItemStatus(it.ID, "proposed")
+	store.InsertProposal(&Proposal{ItemID: it.ID, SlackTS: "1700.p", DraftJSON: "{}", RelatedTicketsJSON: "[]", Branch: "new", Status: "draft"})
+
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> project: nexus"})
+
+	select {
+	case j := <-w.queue:
+		if _, ok := j.(ProposeJob); !ok {
+			t.Fatalf("expected ProposeJob, got %T", j)
+		}
+	default:
+		t.Fatal("expected ProposeJob enqueued after project override on proposed item")
+	}
+	// Old proposal should be rejected.
+	p, _ := store.GetLatestProposal(it.ID)
+	if p.Status != "rejected" {
+		t.Fatalf("old proposal not rejected, status=%s", p.Status)
+	}
+}
+
+func TestCmdPriority_TriggersRegenOnProposedItem(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	w := &Worker{queue: make(chan job, 4)}
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3, Worker: w}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	store.UpdateItemStatus(it.ID, "proposed")
+	store.InsertProposal(&Proposal{ItemID: it.ID, SlackTS: "1700.p", DraftJSON: "{}", RelatedTicketsJSON: "[]", Branch: "new", Status: "draft"})
+
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> priority: high"})
+
+	select {
+	case j := <-w.queue:
+		if _, ok := j.(ProposeJob); !ok {
+			t.Fatalf("expected ProposeJob, got %T", j)
+		}
+	default:
+		t.Fatal("expected ProposeJob enqueued after priority override on proposed item")
+	}
+	// Old proposal should be rejected.
+	p, _ := store.GetLatestProposal(it.ID)
+	if p.Status != "rejected" {
+		t.Fatalf("old proposal not rejected, status=%s", p.Status)
+	}
+}
+
 func TestCmdRegen_EnqueuesProposeJob(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
