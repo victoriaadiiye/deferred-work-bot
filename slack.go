@@ -18,35 +18,6 @@ type SlackAPI interface {
 	AuthTest() (*slack.AuthTestResponse, error)
 }
 
-// Worker is a stub; Task 26 replaces this with the real implementation.
-type Worker struct{ queue chan job }
-
-type job interface{ kind() string }
-
-func (w *Worker) Submit(j job) {
-	if w == nil || w.queue == nil {
-		return
-	}
-	select {
-	case w.queue <- j:
-	default:
-	}
-}
-
-// ProposeJob is a stub; Task 26 will replace it.
-type ProposeJob struct{ ItemID int64 }
-
-func (ProposeJob) kind() string { return "propose" }
-
-// FileJob queues filing of an approved proposal. Task 26 wires the execution.
-type FileJob struct{ ProposalID int64 }
-
-func (FileJob) kind() string { return "file" }
-
-// ReminderJob queues a reminder nudge for an item.
-type ReminderJob struct{ ItemID int64 }
-
-func (ReminderJob) kind() string { return "reminder" }
 
 type Router struct {
 	Store             *Store
