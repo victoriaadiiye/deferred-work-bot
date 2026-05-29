@@ -81,3 +81,59 @@ func TestFakeSlack_PostAndReact(t *testing.T) {
 		t.Fatalf("reactions: %+v", f.reactions)
 	}
 }
+
+func TestRouter_NewItemInWatchedChannel(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{
+		Store: store, Slack: fake, BotUserID: "UBOT",
+		WatchedChannels:   map[string]bool{"C1": true},
+		ApprovalThreshold: 3,
+	}
+	r.HandleMessage(MessageEvent{
+		Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "park this for later",
+	})
+	it, err := store.GetItemByTS("C1", "1700.1")
+	if err != nil {
+		t.Fatalf("item not stored: %v", err)
+	}
+	if it.Status != "collecting" {
+		t.Fatalf("status: %s", it.Status)
+	}
+	if len(fake.reactions) != 1 || fake.reactions[0].Name != "eyes" {
+		t.Fatalf("expected :eyes: reaction, got %+v", fake.reactions)
+	}
+}
+
+func TestRouter_IgnoresOwnMessages(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", User: "UBOT", Text: "I am the bot"})
+	_, err := store.GetItemByTS("C1", "1700.2")
+	if err != ErrNotFound {
+		t.Fatal("bot messages should not be tracked")
+	}
+}
+
+func TestRouter_IgnoresThreadReplyAsItem(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.3", ThreadTS: "1700.1", User: "U1", Text: "reply"})
+	_, err := store.GetItemByTS("C1", "1700.3")
+	if err != ErrNotFound {
+		t.Fatal("thread replies are not new items")
+	}
+}
+
+func TestRouter_NonWatchedChannelIgnored(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}}
+	r.HandleMessage(MessageEvent{Channel: "C999", TS: "1700.4", User: "U1", Text: "park this"})
+	_, err := store.GetItemByTS("C999", "1700.4")
+	if err != ErrNotFound {
+		t.Fatal("non-watched channels should be ignored for top-level posts")
+	}
+}
