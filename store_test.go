@@ -138,3 +138,65 @@ func TestStore_VoteExcludesAuthor(t *testing.T) {
 		t.Fatal("HasVoted should be false initially")
 	}
 }
+
+func TestStore_ProposalsRoundtrip(t *testing.T) {
+	s := newTestStore(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "x", Status: "proposing", ApprovalThreshold: 3}
+	s.InsertItem(it)
+	p := &Proposal{
+		ItemID:             it.ID,
+		SlackTS:            "1700.000200",
+		DraftJSON:          `{"summary":"do X"}`,
+		RelatedTicketsJSON: `[]`,
+		Branch:             "new",
+		Status:             "draft",
+	}
+	if err := s.InsertProposal(p); err != nil {
+		t.Fatal(err)
+	}
+	if p.ID == 0 {
+		t.Fatal("proposal ID not set")
+	}
+	got, err := s.GetLatestProposal(it.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DraftJSON != p.DraftJSON {
+		t.Fatalf("mismatch: %+v", got)
+	}
+}
+
+func TestStore_RecordTicket(t *testing.T) {
+	s := newTestStore(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "x", Status: "proposed", ApprovalThreshold: 3}
+	s.InsertItem(it)
+	p := &Proposal{ItemID: it.ID, SlackTS: "2", DraftJSON: "{}", RelatedTicketsJSON: "[]", Branch: "new", Status: "approved"}
+	s.InsertProposal(p)
+	tk := &Ticket{ProposalID: p.ID, JiraKey: "QORK-1", JiraURL: "https://x/QORK-1", Action: "created"}
+	if err := s.InsertTicket(tk); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetTicketByProposal(p.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.JiraKey != "QORK-1" {
+		t.Fatalf("mismatch: %+v", got)
+	}
+}
+
+func TestStore_LogEvent(t *testing.T) {
+	s := newTestStore(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "x", Status: "collecting", ApprovalThreshold: 3}
+	s.InsertItem(it)
+	if err := s.LogEvent(&it.ID, "vote", `{"user":"U2"}`); err != nil {
+		t.Fatal(err)
+	}
+	events, err := s.ListEventsForItem(it.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Kind != "vote" {
+		t.Fatalf("event mismatch: %+v", events)
+	}
+}

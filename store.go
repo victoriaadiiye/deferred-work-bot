@@ -56,12 +56,51 @@ CREATE TABLE IF NOT EXISTS votes (
 );
 `
 
+const schemaProposals = `
+CREATE TABLE IF NOT EXISTS proposals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+  slack_ts TEXT NOT NULL,
+  draft_json TEXT NOT NULL,
+  related_tickets_json TEXT NOT NULL,
+  branch TEXT NOT NULL,
+  existing_ticket_key TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_proposals_item ON proposals(item_id);
+`
+
+const schemaTickets = `
+CREATE TABLE IF NOT EXISTS tickets (
+  proposal_id INTEGER NOT NULL REFERENCES proposals(id) ON DELETE CASCADE,
+  jira_key TEXT NOT NULL,
+  jira_url TEXT NOT NULL,
+  action TEXT NOT NULL,
+  existing_ticket_key TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (proposal_id, jira_key)
+);
+`
+
+const schemaEvents = `
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id INTEGER REFERENCES items(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL DEFAULT '{}',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_events_item ON events(item_id);
+`
+
 func OpenStore(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := db.Exec(schemaItems + schemaVotes); err != nil {
+	if _, err := db.Exec(schemaItems + schemaVotes + schemaProposals + schemaTickets + schemaEvents); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -175,4 +214,123 @@ func (s *Store) HasVoted(itemID int64, user string) (bool, error) {
 		return false, nil
 	}
 	return err == nil, err
+}
+
+type Proposal struct {
+	ID                 int64
+	ItemID             int64
+	SlackTS            string
+	DraftJSON          string
+	RelatedTicketsJSON string
+	Branch             string
+	ExistingTicketKey  string
+	Status             string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+type Ticket struct {
+	ProposalID        int64
+	JiraKey           string
+	JiraURL           string
+	Action            string
+	ExistingTicketKey string
+	CreatedAt         time.Time
+}
+
+type Event struct {
+	ID        int64
+	ItemID    *int64
+	Kind      string
+	Payload   string
+	CreatedAt time.Time
+}
+
+func (s *Store) InsertProposal(p *Proposal) error {
+	res, err := s.db.Exec(`INSERT INTO proposals(item_id, slack_ts, draft_json, related_tickets_json, branch, existing_ticket_key, status) VALUES(?,?,?,?,?,?,?)`,
+		p.ItemID, p.SlackTS, p.DraftJSON, p.RelatedTicketsJSON, p.Branch, p.ExistingTicketKey, p.Status)
+	if err != nil {
+		return err
+	}
+	id, _ := res.LastInsertId()
+	p.ID = id
+	return nil
+}
+
+func (s *Store) GetLatestProposal(itemID int64) (*Proposal, error) {
+	row := s.db.QueryRow(`SELECT id, item_id, slack_ts, draft_json, related_tickets_json, branch, existing_ticket_key, status, created_at, updated_at FROM proposals WHERE item_id = ? ORDER BY id DESC LIMIT 1`, itemID)
+	var p Proposal
+	err := row.Scan(&p.ID, &p.ItemID, &p.SlackTS, &p.DraftJSON, &p.RelatedTicketsJSON, &p.Branch, &p.ExistingTicketKey, &p.Status, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return &p, err
+}
+
+func (s *Store) UpdateProposalStatus(id int64, status string) error {
+	_, err := s.db.Exec(`UPDATE proposals SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, status, id)
+	return err
+}
+
+func (s *Store) GetProposalBySlackTS(ts string) (*Proposal, error) {
+	row := s.db.QueryRow(`SELECT id, item_id, slack_ts, draft_json, related_tickets_json, branch, existing_ticket_key, status, created_at, updated_at FROM proposals WHERE slack_ts = ?`, ts)
+	var p Proposal
+	err := row.Scan(&p.ID, &p.ItemID, &p.SlackTS, &p.DraftJSON, &p.RelatedTicketsJSON, &p.Branch, &p.ExistingTicketKey, &p.Status, &p.CreatedAt, &p.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return &p, err
+}
+
+func (s *Store) InsertTicket(t *Ticket) error {
+	_, err := s.db.Exec(`INSERT INTO tickets(proposal_id, jira_key, jira_url, action, existing_ticket_key) VALUES(?,?,?,?,?)`,
+		t.ProposalID, t.JiraKey, t.JiraURL, t.Action, t.ExistingTicketKey)
+	return err
+}
+
+func (s *Store) GetTicketByProposal(proposalID int64) (*Ticket, error) {
+	row := s.db.QueryRow(`SELECT proposal_id, jira_key, jira_url, action, existing_ticket_key, created_at FROM tickets WHERE proposal_id = ? LIMIT 1`, proposalID)
+	var t Ticket
+	err := row.Scan(&t.ProposalID, &t.JiraKey, &t.JiraURL, &t.Action, &t.ExistingTicketKey, &t.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return &t, err
+}
+
+func (s *Store) LogEvent(itemID *int64, kind, payload string) error {
+	_, err := s.db.Exec(`INSERT INTO events(item_id, kind, payload_json) VALUES(?,?,?)`, itemID, kind, payload)
+	return err
+}
+
+func (s *Store) ListEventsForItem(itemID int64) ([]*Event, error) {
+	rows, err := s.db.Query(`SELECT id, item_id, kind, payload_json, created_at FROM events WHERE item_id = ? ORDER BY id`, itemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Event
+	for rows.Next() {
+		var e Event
+		var iid sql.NullInt64
+		if err := rows.Scan(&e.ID, &iid, &e.Kind, &e.Payload, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		if iid.Valid {
+			v := iid.Int64
+			e.ItemID = &v
+		}
+		out = append(out, &e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdateItemReminderTimes(id int64, lastReminder, warning *time.Time) error {
+	_, err := s.db.Exec(`UPDATE items SET last_reminder_at = ?, warning_posted_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, lastReminder, warning, id)
+	return err
+}
+
+func (s *Store) UpdateItemSubproject(id int64, sub string) error {
+	_, err := s.db.Exec(`UPDATE items SET subproject = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, sub, id)
+	return err
 }
