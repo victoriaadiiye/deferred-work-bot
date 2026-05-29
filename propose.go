@@ -106,6 +106,95 @@ Only return the JSON array, no other text.`, workText, string(payload))
 	return res, nil
 }
 
+type DraftInput struct {
+	Text         string
+	Thread       []string
+	Subproject   string
+	PriorityOver string
+	Permalink    string
+}
+
+type Draft struct {
+	Summary     string   `json:"summary"`
+	Description string   `json:"description"`
+	IssueType   string   `json:"issue_type"`
+	Labels      []string `json:"labels"`
+	Priority    string   `json:"priority"`
+}
+
+func DraftTicket(ctx context.Context, c claudeAPI, in DraftInput) (*Draft, error) {
+	prompt := fmt.Sprintf(`You are drafting a Jira ticket from a Slack deferred-work item.
+
+Sub-project label: %q
+Original message:
+%s
+
+Thread comments:
+%s
+
+Slack permalink: %s
+
+Return JSON:
+{
+  "summary": "<one-line, imperative voice, <=120 chars>",
+  "description": "<multi-paragraph description, include original message verbatim, then synthesized context from comments, then a final line with the Slack permalink>",
+  "labels": ["deferred-work"%s],
+  "priority": "Low|Medium|High"
+}
+Only return the JSON, no other text.`,
+		in.Subproject,
+		in.Text,
+		strings.Join(in.Thread, "\n---\n"),
+		in.Permalink,
+		labelHint(in.Subproject),
+	)
+	out, err := c.Run(ctx, prompt)
+	if err != nil {
+		return nil, err
+	}
+	js, err := ExtractJSON(out)
+	if err != nil {
+		return nil, err
+	}
+	var d Draft
+	if err := json.Unmarshal([]byte(js), &d); err != nil {
+		return nil, err
+	}
+	d.IssueType = "Task"
+	if in.PriorityOver != "" {
+		d.Priority = in.PriorityOver
+	}
+	if d.Priority == "" {
+		d.Priority = "Medium"
+	}
+	// Ensure deferred-work + subproject labels are present.
+	d.Labels = ensureLabels(d.Labels, "deferred-work", in.Subproject)
+	return &d, nil
+}
+
+func labelHint(sub string) string {
+	if sub == "" {
+		return ""
+	}
+	return `, "` + sub + `"`
+}
+
+func ensureLabels(labels []string, required ...string) []string {
+	seen := map[string]bool{}
+	for _, l := range labels {
+		seen[l] = true
+	}
+	out := labels
+	for _, r := range required {
+		if r == "" || seen[r] {
+			continue
+		}
+		out = append(out, r)
+		seen[r] = true
+	}
+	return out
+}
+
 // DecideBranch picks the proposal branch from related-ticket classifications.
 // Returns (branch, existingKey). existingKey is set only when branch == "awaiting_resolution".
 func DecideBranch(rels []RelatedTicket) (string, string) {

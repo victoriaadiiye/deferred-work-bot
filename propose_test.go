@@ -86,6 +86,41 @@ func TestClassifyRelatedTickets(t *testing.T) {
 	}
 }
 
+func TestDraftTicket(t *testing.T) {
+	fc := &fakeClaude{resp: `{
+		"summary": "Fix flaky test in qompass ingest",
+		"description": "Long form description...",
+		"labels": ["deferred-work", "qompass"],
+		"priority": "Medium"
+	}`}
+	d, err := DraftTicket(context.Background(), fc, DraftInput{
+		Text:         "test is flaky in qompass",
+		Thread:       []string{"+1 from me"},
+		Subproject:   "qompass",
+		PriorityOver: "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Summary != "Fix flaky test in qompass ingest" {
+		t.Fatalf("summary: %s", d.Summary)
+	}
+	if d.IssueType != "Task" {
+		t.Fatalf("type: %s", d.IssueType)
+	}
+	if len(d.Labels) != 2 || d.Labels[0] != "deferred-work" {
+		t.Fatalf("labels: %+v", d.Labels)
+	}
+}
+
+func TestDraftTicket_PriorityOverride(t *testing.T) {
+	fc := &fakeClaude{resp: `{"summary":"s","description":"d","labels":["deferred-work"],"priority":"Low"}`}
+	d, _ := DraftTicket(context.Background(), fc, DraftInput{Text: "x", PriorityOver: "High"})
+	if d.Priority != "High" {
+		t.Fatalf("expected override to High, got %s", d.Priority)
+	}
+}
+
 func TestDecideBranch(t *testing.T) {
 	cases := []struct {
 		name     string
