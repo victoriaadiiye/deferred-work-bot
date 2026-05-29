@@ -1,0 +1,10 @@
+services:
+  bot:
+    build: .
+    env_file: .env
+    volumes:
+      - ./data:/data
+      - ${HOST_HOME:-/home/vuifhaolain}/.claude:/root/.claude:ro
+    ports:
+      - "${HEALTH_PORT:-8080}:8080"
+    restart: unless-stopped
