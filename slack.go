@@ -367,6 +367,9 @@ func (r *Router) handleProposalReaction(e ReactionEvent, add bool) {
 	if it == nil || isTerminal(it.Status) {
 		return
 	}
+	if r.Worker == nil {
+		return
+	}
 	r.Worker.Submit(FileJob{ProposalID: p.ID})
 }
 

@@ -420,6 +420,53 @@ func TestCmdFreeform_AsksClaude(t *testing.T) {
 	}
 }
 
+func TestRouter_ProposalReactionFilesViaWorker(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	sig := &SignalsConfig{ApproveReactions: []string{"white_check_mark"}}
+	w := &Worker{queue: make(chan job, 4)}
+	r := &Router{
+		Store:             store,
+		Slack:             fake,
+		BotUserID:         "UBOT",
+		WatchedChannels:   map[string]bool{"C1": true},
+		Signals:           sig,
+		ApprovalThreshold: 3,
+		Worker:            w,
+	}
+	// Create an item.
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "do some work"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	store.UpdateItemStatus(it.ID, "proposed")
+
+	// Seed a proposal with status=draft, recorded at a known ts.
+	p := &Proposal{
+		ItemID:             it.ID,
+		SlackTS:            "1700.prop",
+		DraftJSON:          `{"summary":"s","description":"d","issue_type":"Task","labels":["deferred-work"],"priority":"Medium"}`,
+		RelatedTicketsJSON: "[]",
+		Branch:             "new",
+		Status:             "draft",
+	}
+	store.InsertProposal(p)
+
+	// Reaction added on the proposal message ts — should route through handleProposalReaction.
+	r.HandleReactionAdded(ReactionEvent{User: "U2", Channel: "C1", TS: "1700.prop", Name: "white_check_mark"})
+
+	select {
+	case j := <-w.queue:
+		fj, ok := j.(FileJob)
+		if !ok {
+			t.Fatalf("expected FileJob, got %T", j)
+		}
+		if fj.ProposalID != p.ID {
+			t.Fatalf("expected proposalID %d, got %d", p.ID, fj.ProposalID)
+		}
+	default:
+		t.Fatal("expected FileJob to be enqueued")
+	}
+}
+
 func TestRouter_ResolutionCommentKeyword(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
