@@ -246,3 +246,24 @@ func TestRouter_BotMentionDispatch(t *testing.T) {
 		t.Fatal("expected bot to post status reply")
 	}
 }
+
+func TestRouter_AppMentionInNonWatchedChannelCreatesItem(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
+	r.HandleAppMention(MessageEvent{Channel: "C999", TS: "1700.5", User: "U2", Text: "<@UBOT> track this work"})
+	if _, err := store.GetItemByTS("C999", "1700.5"); err != nil {
+		t.Fatalf("expected item, got: %v", err)
+	}
+}
+
+func TestRouter_AppMentionInThreadDispatchesCommand(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	r.HandleAppMention(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> status"})
+	if len(fake.posted) == 0 {
+		t.Fatal("expected status reply")
+	}
+}

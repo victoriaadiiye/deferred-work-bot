@@ -273,3 +273,31 @@ func isTerminal(status string) bool {
 func slackItem(channel, ts string) slack.ItemRef {
 	return slack.ItemRef{Channel: channel, Timestamp: ts}
 }
+
+func (r *Router) HandleAppMention(e MessageEvent) {
+	if e.User == r.BotUserID || e.User == "" {
+		return
+	}
+	if e.ThreadTS != "" && e.ThreadTS != e.TS {
+		// route as thread reply
+		r.handleThreadReply(e)
+		return
+	}
+	// Top-level @mention in a non-watched channel — create item.
+	if _, err := r.Store.GetItemByTS(e.Channel, e.TS); err == nil {
+		return // already tracked
+	}
+	it := &Item{
+		SlackChannel:      e.Channel,
+		SlackTS:           e.TS,
+		AuthorSlackID:     e.User,
+		Text:              e.Text,
+		Status:            "collecting",
+		ApprovalThreshold: r.ApprovalThreshold,
+	}
+	if err := r.Store.InsertItem(it); err != nil {
+		return
+	}
+	r.Slack.AddReaction("eyes", slackItem(e.Channel, e.TS))
+	r.Store.LogEvent(&it.ID, "created", `{"via":"app_mention"}`)
+}
