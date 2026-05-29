@@ -185,7 +185,22 @@ func (r *Router) postHelp(e MessageEvent) {
 }
 
 func (r *Router) handleResolution(it *Item, p *Proposal, keyword string, e MessageEvent) {
-	// Implemented in Task 21.
+	var branch string
+	switch keyword {
+	case "new":
+		branch = "new"
+	case "comment":
+		branch = "comment_on_existing"
+	case "both":
+		branch = "both"
+	default:
+		return
+	}
+	r.Store.UpdateProposalBranch(p.ID, branch, "draft")
+	r.Store.LogEvent(&it.ID, "resolution", `{"branch":"`+branch+`"}`)
+	r.Slack.PostMessage(e.Channel,
+		slack.MsgOptionText(fmt.Sprintf("Resolution: *%s*. React with any approve signal to file.", branch), false),
+		slack.MsgOptionTS(it.SlackTS))
 }
 
 type ReactionEvent struct {

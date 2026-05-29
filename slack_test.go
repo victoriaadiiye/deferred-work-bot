@@ -291,3 +291,38 @@ func TestRouter_MessageEditedUpdatesText(t *testing.T) {
 		t.Fatalf("text not updated: %s", it.Text)
 	}
 }
+
+func TestRouter_ResolutionNewKeyword(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	store.UpdateItemStatus(it.ID, "proposed")
+	p := &Proposal{ItemID: it.ID, SlackTS: "1700.2", DraftJSON: `{"summary":"s"}`, RelatedTicketsJSON: "[]", Branch: "awaiting_resolution", ExistingTicketKey: "QORK-5", Status: "awaiting_resolution"}
+	store.InsertProposal(p)
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.3", ThreadTS: "1700.1", User: "U2", Text: "let's file as new"})
+	got, _ := store.GetLatestProposal(it.ID)
+	if got.Branch != "new" {
+		t.Fatalf("branch: %s", got.Branch)
+	}
+}
+
+func TestRouter_ResolutionCommentKeyword(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	store.UpdateItemStatus(it.ID, "proposed")
+	p := &Proposal{ItemID: it.ID, SlackTS: "1700.2", DraftJSON: "{}", RelatedTicketsJSON: "[]", Branch: "awaiting_resolution", ExistingTicketKey: "QORK-5", Status: "awaiting_resolution"}
+	store.InsertProposal(p)
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.3", ThreadTS: "1700.1", User: "U2", Text: "comment please"})
+	got, _ := store.GetLatestProposal(it.ID)
+	if got.Branch != "comment_on_existing" {
+		t.Fatalf("branch: %s", got.Branch)
+	}
+	if got.Status != "draft" {
+		t.Fatalf("status: %s", got.Status)
+	}
+}

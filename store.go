@@ -339,3 +339,8 @@ func (s *Store) UpdateItemText(id int64, text string) error {
 	_, err := s.db.Exec(`UPDATE items SET text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, text, id)
 	return err
 }
+
+func (s *Store) UpdateProposalBranch(id int64, branch, status string) error {
+	_, err := s.db.Exec(`UPDATE proposals SET branch = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, branch, status, id)
+	return err
+}
