@@ -1,6 +1,11 @@
 package main
 
-import "github.com/slack-go/slack"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/slack-go/slack"
+)
 
 type SlackAPI interface {
 	PostMessage(channelID string, options ...slack.MsgOption) (channel string, ts string, err error)
@@ -84,7 +89,103 @@ func (r *Router) HandleMessage(e MessageEvent) {
 }
 
 func (r *Router) handleThreadReply(e MessageEvent) {
-	// Implemented in later task.
+	parent, err := r.Store.GetItemByTS(e.Channel, e.ThreadTS)
+	if err != nil {
+		return
+	}
+	if isTerminal(parent.Status) {
+		return
+	}
+	text := strings.ToLower(e.Text)
+
+	if ReplyHasCancel(r.Signals, text) || r.botMentioned(e.Text) && strings.Contains(text, "cancel") {
+		r.Store.UpdateItemStatus(parent.ID, "cancelled")
+		r.Store.LogEvent(&parent.ID, "cancel", `{"by":"`+e.User+`","via":"reply"}`)
+		r.Slack.AddReaction("wastebasket", slackItem(parent.SlackChannel, parent.SlackTS))
+		return
+	}
+
+	if r.botMentioned(e.Text) {
+		r.dispatchCommand(parent, e)
+		return
+	}
+
+	// Resolution keywords only apply when latest proposal is awaiting resolution.
+	if p, err := r.Store.GetLatestProposal(parent.ID); err == nil && p.Status == "awaiting_resolution" {
+		if kw := ResolutionKeyword(text); kw != "" {
+			r.handleResolution(parent, p, kw, e)
+			return
+		}
+	}
+
+	if ReplyHasApprove(r.Signals, text) {
+		if e.User == parent.AuthorSlackID {
+			return
+		}
+		r.Store.UpsertVote(parent.ID, e.User, "reply", "keyword")
+		r.Store.LogEvent(&parent.ID, "vote", `{"user":"`+e.User+`","source":"reply"}`)
+		// If this is a proposal-thread vote on the proposal message itself,
+		// handle that separately. Otherwise it's a vote on the item.
+		r.maybeAdvanceToProposing(parent)
+	}
+}
+
+func (r *Router) botMentioned(text string) bool {
+	return strings.Contains(text, "<@"+r.BotUserID+">")
+}
+
+func (r *Router) dispatchCommand(it *Item, e MessageEvent) {
+	cmd := normalizeCommand(e.Text, r.BotUserID)
+	switch {
+	case cmd == "status":
+		r.cmdStatus(it, e)
+	case cmd == "help":
+		r.cmdHelp(it, e)
+	case cmd == "cancel":
+		r.cmdCancel(it, e)
+	case cmd == "file now":
+		r.cmdFileNow(it, e)
+	case cmd == "regen":
+		r.cmdRegen(it, e)
+	case cmd == "search":
+		r.cmdSearch(it, e)
+	case strings.HasPrefix(cmd, "project:"):
+		r.cmdProject(it, e, strings.TrimSpace(strings.TrimPrefix(cmd, "project:")))
+	case strings.HasPrefix(cmd, "priority:"):
+		r.cmdPriority(it, e, strings.TrimSpace(strings.TrimPrefix(cmd, "priority:")))
+	default:
+		r.cmdFreeform(it, e, cmd)
+	}
+}
+
+// normalizeCommand strips the bot mention and lowercases the remainder.
+func normalizeCommand(text, botID string) string {
+	t := strings.ReplaceAll(text, "<@"+botID+">", "")
+	return strings.ToLower(strings.TrimSpace(t))
+}
+
+// Stubs — real implementations land in later tasks.
+func (r *Router) cmdStatus(it *Item, e MessageEvent) {
+	n, _ := r.Store.CountVotes(it.ID)
+	msg := fmt.Sprintf("Status: *%s* — %d/%d approvals", it.Status, n, it.ApprovalThreshold)
+	r.Slack.PostMessage(e.Channel, slack.MsgOptionText(msg, false), slack.MsgOptionTS(it.SlackTS))
+}
+func (r *Router) cmdHelp(it *Item, e MessageEvent)               { r.postHelp(e) }
+func (r *Router) cmdCancel(it *Item, e MessageEvent)             { r.Store.UpdateItemStatus(it.ID, "cancelled"); r.Slack.AddReaction("wastebasket", slackItem(it.SlackChannel, it.SlackTS)) }
+func (r *Router) cmdFileNow(it *Item, e MessageEvent)            { /* Task 23 */ }
+func (r *Router) cmdRegen(it *Item, e MessageEvent)              { /* Task 24 */ }
+func (r *Router) cmdSearch(it *Item, e MessageEvent)             { /* Task 24 */ }
+func (r *Router) cmdProject(it *Item, e MessageEvent, v string)  { r.Store.UpdateItemSubproject(it.ID, v); r.Slack.AddReaction("white_check_mark", slackItem(e.Channel, e.TS)) }
+func (r *Router) cmdPriority(it *Item, e MessageEvent, v string) { /* Task 24 */ }
+func (r *Router) cmdFreeform(it *Item, e MessageEvent, q string) { /* Task 25 */ }
+
+func (r *Router) postHelp(e MessageEvent) {
+	help := "*Commands:* `status`, `cancel`, `regen`, `project: <name>`, `priority: <low|med|high>`, `file now`, `search`, `help`, or any free-form question."
+	r.Slack.PostMessage(e.Channel, slack.MsgOptionText(help, false), slack.MsgOptionTS(e.ThreadTS))
+}
+
+func (r *Router) handleResolution(it *Item, p *Proposal, keyword string, e MessageEvent) {
+	// Implemented in Task 21.
 }
 
 type ReactionEvent struct {

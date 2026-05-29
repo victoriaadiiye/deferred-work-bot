@@ -207,3 +207,42 @@ func TestRouter_CancelReactionMarksCancelled(t *testing.T) {
 		t.Fatalf("expected cancelled, got %s", it.Status)
 	}
 }
+
+func TestRouter_ReplyApproveKeywordCountsVote(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	sig := &SignalsConfig{ApproveReplies: []string{"lgtm", "+1", "approve"}}
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "LGTM"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	n, _ := store.CountVotes(it.ID)
+	if n != 1 {
+		t.Fatalf("expected 1 vote, got %d", n)
+	}
+}
+
+func TestRouter_ReplyCancelKeyword(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	sig := &SignalsConfig{CancelReplies: []string{"cancel"}}
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> cancel"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	if it.Status != "cancelled" {
+		t.Fatalf("expected cancelled, got %s", it.Status)
+	}
+}
+
+func TestRouter_BotMentionDispatch(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> status"})
+	// Bot should have posted at least one reply.
+	if len(fake.posted) < 1 {
+		t.Fatal("expected bot to post status reply")
+	}
+}
