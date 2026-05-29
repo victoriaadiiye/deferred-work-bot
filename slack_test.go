@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/slack-go/slack"
+	"net/url"
 )
 
 type fakeSlack struct {
@@ -69,7 +70,16 @@ func (f *fakeSlack) AuthTest() (*slack.AuthTestResponse, error) {
 }
 
 func generateTS(n int) string { return "1700000000.00010" + string(rune('0'+n%10)) }
-func optionsText(_ []slack.MsgOption) string { return "" }
+
+func optionsText(options []slack.MsgOption) string {
+	_, vals, err := slack.UnsafeApplyMsgOptions("", "", "https://slack.com/api/", options...)
+	if err != nil {
+		return ""
+	}
+	return vals.Get("text")
+}
+
+var _ url.Values // ensure net/url is used
 
 func TestFakeSlack_PostAndReact(t *testing.T) {
 	f := newFakeSlack("UBOT")
