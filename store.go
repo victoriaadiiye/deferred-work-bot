@@ -213,6 +213,25 @@ func (s *Store) CountVotes(itemID int64) (int, error) {
 	return n, err
 }
 
+// ListVoters returns the Slack user IDs of everyone who has voted on an item,
+// ordered by when they cast their vote.
+func (s *Store) ListVoters(itemID int64) ([]string, error) {
+	rows, err := s.db.Query(`SELECT user_slack_id FROM votes WHERE item_id = ? ORDER BY created_at`, itemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) HasVoted(itemID int64, user string) (bool, error) {
 	row := s.db.QueryRow(`SELECT 1 FROM votes WHERE item_id = ? AND user_slack_id = ?`, itemID, user)
 	var v int

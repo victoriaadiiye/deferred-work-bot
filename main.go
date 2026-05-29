@@ -67,7 +67,8 @@ func main() {
 		Store: store, Slack: api, BotUserID: botID,
 		WatchedChannels: watched, ApprovalThreshold: cfg.ApprovalThreshold,
 		Signals: signals, Projects: projects, Worker: worker, Config: cfg,
-		Claude: claudeRunner,
+		Claude:           claudeRunner,
+		ReminderInterval: time.Duration(cfg.ReminderIntervalDays) * 24 * time.Hour,
 	}
 
 	tk := &Ticker{

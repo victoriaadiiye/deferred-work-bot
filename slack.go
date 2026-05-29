@@ -30,6 +30,7 @@ type Router struct {
 	Worker            *Worker
 	Config            *Config
 	Claude            claudeAPI
+	ReminderInterval  time.Duration
 }
 
 type MessageEvent struct {
@@ -151,7 +152,41 @@ func normalizeCommand(text, botID string) string {
 func (r *Router) cmdStatus(it *Item, e MessageEvent) {
 	n, _ := r.Store.CountVotes(it.ID)
 	age := time.Since(it.CreatedAt).Hours() / 24
-	msg := fmt.Sprintf("*Status:* `%s` — *%d/%d* approvals, idle *%.1fd*.", it.Status, n, it.ApprovalThreshold, age)
+
+	var lines []string
+	lines = append(lines, fmt.Sprintf("*Status:* `%s` — *%d/%d* approvals, idle *%.1fd*", it.Status, n, it.ApprovalThreshold, age))
+
+	// Voters list.
+	voters, _ := r.Store.ListVoters(it.ID)
+	if len(voters) > 0 {
+		mentions := make([]string, len(voters))
+		for i, u := range voters {
+			mentions[i] = "<@" + u + ">"
+		}
+		lines = append(lines, "*Voters:* "+strings.Join(mentions, ", "))
+	} else {
+		lines = append(lines, "*Voters:* none yet")
+	}
+
+	// Next-reminder ETA (only meaningful while still collecting).
+	if it.Status == "collecting" && r.ReminderInterval > 0 {
+		var nextReminder time.Time
+		if it.LastReminderAt != nil {
+			nextReminder = it.LastReminderAt.Add(r.ReminderInterval)
+		} else {
+			nextReminder = it.CreatedAt.Add(r.ReminderInterval)
+		}
+		eta := time.Until(nextReminder)
+		var etaStr string
+		if eta <= 0 {
+			etaStr = "due now"
+		} else {
+			etaStr = fmt.Sprintf("in %.1fd", eta.Hours()/24)
+		}
+		lines = append(lines, "*Next reminder:* "+etaStr)
+	}
+
+	msg := strings.Join(lines, "\n")
 	r.Slack.PostMessage(e.Channel, slack.MsgOptionText(msg, false), slack.MsgOptionTS(it.SlackTS))
 }
 
