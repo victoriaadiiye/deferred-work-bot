@@ -1,0 +1,29 @@
+version: '3'
+tasks:
+  build:
+    cmds:
+      - go build -o deferred-work-bot ./...
+  test:
+    cmds:
+      - go test ./... -count=1 -race
+  fmt:
+    cmds:
+      - gofumpt -w .
+  lint:
+    cmds:
+      - golangci-lint run
+  deploy:
+    cmds:
+      - docker compose up -d --build
+  redeploy:
+    cmds:
+      - docker compose up -d --build --force-recreate
+  kill:
+    cmds:
+      - docker compose down
+  logs:
+    cmds:
+      - docker compose logs -f
+  status:
+    cmds:
+      - docker compose ps

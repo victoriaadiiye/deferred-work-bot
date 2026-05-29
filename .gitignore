@@ -1,0 +1,6 @@
+.env
+data/
+*.db
+*.db-*
+deferred-work-bot
+private-key.pem
