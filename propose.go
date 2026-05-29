@@ -428,6 +428,33 @@ func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {
 
 	var draft Draft
 	json.Unmarshal([]byte(p.DraftJSON), &draft)
+
+	// When the item was originally awaiting_resolution and resolved to new/both,
+	// the proposal was created without a draft. Re-draft now before filing.
+	if (p.Branch == "new" || p.Branch == "both") && draft.Summary == "" {
+		msgs, _, _, _ := e.Slack.GetConversationReplies(&slack.GetConversationRepliesParameters{ChannelID: it.SlackChannel, Timestamp: it.SlackTS})
+		var thread []string
+		for _, m := range msgs {
+			if m.User == e.BotUserID || m.Timestamp == it.SlackTS {
+				continue
+			}
+			thread = append(thread, m.Text)
+		}
+		permalink, _ := e.Slack.GetPermalink(&slack.PermalinkParameters{Channel: it.SlackChannel, Ts: it.SlackTS})
+		priority, _ := e.Store.LatestOverride(it.ID, "priority_override")
+		d, err := DraftTicket(ctx, e.Claude, DraftInput{
+			Text:         it.Text,
+			Thread:       thread,
+			Subproject:   it.Subproject,
+			PriorityOver: priority,
+			Permalink:    permalink,
+		})
+		if err != nil {
+			return err
+		}
+		draft = *d
+	}
+
 	commentText := buildExistingTicketComment(it.Text, draft.Description)
 
 	projectKey := ""
