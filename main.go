@@ -80,7 +80,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	go runTicker(ctx, tk)
 
-	health := NewHealthServer(HealthDeps{Store: store, Worker: worker, TriggerToken: cfg.TriggerToken})
+	health := NewHealthServer(HealthDeps{Store: store, Worker: worker, TriggerToken: cfg.TriggerToken, Slack: api})
 	go func() {
 		addr := fmt.Sprintf(":%d", cfg.HealthPort)
 		log.Printf("health listening on %s", addr)

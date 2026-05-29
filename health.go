@@ -4,12 +4,15 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+
+	"github.com/slack-go/slack"
 )
 
 type HealthDeps struct {
 	Store        *Store
 	Worker       *Worker
 	TriggerToken string
+	Slack        SlackAPI
 }
 
 type HealthServer struct{ deps HealthDeps }
@@ -72,6 +75,20 @@ func (h *HealthServer) trigger(w http.ResponseWriter, r *http.Request) {
 		h.deps.Worker.Submit(ProposeJob{ItemID: itemID})
 	case "reminder":
 		h.deps.Worker.Submit(ReminderJob{ItemID: itemID})
+	case "archive":
+		it, err := h.deps.Store.GetItemByID(itemID)
+		if err != nil {
+			http.Error(w, "item not found", 404)
+			return
+		}
+		if !isTerminal(it.Status) {
+			h.deps.Store.UpdateItemStatus(it.ID, "archived")
+			h.deps.Store.LogEvent(&it.ID, "archive", `{"via":"trigger"}`)
+			// Best effort: react on original message; ignore Slack errors.
+			if h.deps.Slack != nil {
+				h.deps.Slack.AddReaction("wastebasket", slack.ItemRef{Channel: it.SlackChannel, Timestamp: it.SlackTS})
+			}
+		}
 	default:
 		http.Error(w, "bad action", 400)
 		return
