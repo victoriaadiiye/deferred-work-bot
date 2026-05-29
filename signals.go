@@ -3,6 +3,7 @@ package main
 import (
 	"regexp"
 	"strings"
+	"sync"
 )
 
 func IsApproveReaction(sig *SignalsConfig, emoji string) bool {
@@ -52,14 +53,25 @@ func anyWordMatch(text string, tokens []string) bool {
 	return false
 }
 
-var wordCache = map[string]*regexp.Regexp{}
+var (
+	wordCacheMu sync.RWMutex
+	wordCache   = map[string]*regexp.Regexp{}
+)
 
 func wordMatch(text, token string) bool {
+	wordCacheMu.RLock()
 	re, ok := wordCache[token]
+	wordCacheMu.RUnlock()
 	if !ok {
 		// allow '+', alphanumerics, dashes; word-boundary that treats '+' and '-' as word chars
-		re = regexp.MustCompile(`(^|[^\w\-+])` + regexp.QuoteMeta(token) + `($|[^\w\-+])`)
-		wordCache[token] = re
+		compiled := regexp.MustCompile(`(^|[^\w\-+])` + regexp.QuoteMeta(token) + `($|[^\w\-+])`)
+		wordCacheMu.Lock()
+		// Check again under write lock in case another goroutine compiled it.
+		if re, ok = wordCache[token]; !ok {
+			re = compiled
+			wordCache[token] = re
+		}
+		wordCacheMu.Unlock()
 	}
 	return re.MatchString(text)
 }
