@@ -23,6 +23,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("projects.yaml: %v", err)
 	}
+	// JIRA_QORK_PROJECTS env var overrides projects.yaml when set.
+	if len(cfg.JiraQORKProjects) > 0 {
+		projects.QORKProjects = cfg.JiraQORKProjects
+	}
 	signals, err := LoadSignals("signals.yaml")
 	if err != nil {
 		log.Fatalf("signals.yaml: %v", err)

@@ -32,7 +32,7 @@ type Config struct {
 func LoadConfig() (*Config, error) {
 	required := []string{
 		"SLACK_APP_TOKEN", "SLACK_BOT_TOKEN", "WATCHED_CHANNELS",
-		"JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "JIRA_QORK_PROJECTS",
+		"JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN",
 	}
 	var missing []string
 	for _, k := range required {
