@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -57,6 +58,7 @@ type Router struct {
 	Projects          *ProjectsConfig
 	Worker            *Worker
 	Config            *Config
+	Claude            claudeAPI
 }
 
 type MessageEvent struct {
@@ -258,7 +260,34 @@ func (r *Router) cmdPriority(it *Item, e MessageEvent, v string) {
 	r.Store.LogEvent(&it.ID, "priority_override", `{"value":"`+value+`","by":"`+e.User+`"}`)
 	r.Slack.AddReaction("white_check_mark", slackItem(e.Channel, e.TS))
 }
-func (r *Router) cmdFreeform(it *Item, e MessageEvent, q string) { /* Task 25 */ }
+func (r *Router) cmdFreeform(it *Item, e MessageEvent, q string) {
+	if r.Claude == nil {
+		return
+	}
+	thread, _, _, _ := r.Slack.GetConversationReplies(&slack.GetConversationRepliesParameters{ChannelID: it.SlackChannel, Timestamp: it.SlackTS})
+	var ctx []string
+	for _, m := range thread {
+		ctx = append(ctx, m.Text)
+	}
+	prompt := fmt.Sprintf(`Answer this question about a deferred-work item.
+
+ITEM:
+%s
+
+THREAD:
+%s
+
+QUESTION:
+%s
+
+Be concise (under 100 words). Reply with plain text only.`, it.Text, strings.Join(ctx, "\n---\n"), q)
+	out, err := r.Claude.Run(context.Background(), prompt)
+	if err != nil {
+		r.Slack.PostMessage(e.Channel, slack.MsgOptionText("(claude error)", false), slack.MsgOptionTS(it.SlackTS))
+		return
+	}
+	r.Slack.PostMessage(e.Channel, slack.MsgOptionText(strings.TrimSpace(out), false), slack.MsgOptionTS(it.SlackTS))
+}
 
 func (r *Router) handleResolution(it *Item, p *Proposal, keyword string, e MessageEvent) {
 	var branch string

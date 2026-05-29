@@ -392,6 +392,24 @@ func TestCmdRegen_EnqueuesProposeJob(t *testing.T) {
 	}
 }
 
+func TestCmdFreeform_AsksClaude(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	fc := &fakeClaude{resp: "this item is about flaky tests."}
+	r := &Router{
+		Store: store, Slack: fake, BotUserID: "UBOT",
+		WatchedChannels: map[string]bool{"C1": true},
+		Signals:         &SignalsConfig{},
+		ApprovalThreshold: 3,
+		Claude:          fc,
+	}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "flaky test in qompass"})
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> what's this about?"})
+	if len(fake.posted) == 0 {
+		t.Fatal("expected reply")
+	}
+}
+
 func TestRouter_ResolutionCommentKeyword(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
