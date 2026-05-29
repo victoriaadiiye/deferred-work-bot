@@ -97,7 +97,13 @@ CREATE INDEX IF NOT EXISTS idx_events_item ON events(item_id);
 `
 
 func OpenStore(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	dsn := path
+	// WAL mode and busy_timeout are not applicable to in-memory databases
+	// (used in tests); only append pragmas for file-based paths.
+	if path != ":memory:" && path != "" && path[0] != ':' {
+		dsn = path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
