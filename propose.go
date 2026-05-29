@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/slack-go/slack"
 )
 
 type claudeAPI interface {
@@ -297,4 +299,225 @@ func DecideBranch(rels []RelatedTicket) (string, string) {
 		}
 	}
 	return "new", ""
+}
+
+type JobExecutor struct {
+	Store     *Store
+	Slack     SlackAPI
+	Claude    claudeAPI
+	Jira      jiraAPI
+	Projects  *ProjectsConfig
+	Signals   *SignalsConfig
+	BotUserID string
+}
+
+func (e *JobExecutor) Execute(ctx context.Context, j job) error {
+	switch v := j.(type) {
+	case ProposeJob:
+		return e.executePropose(ctx, v.ItemID)
+	case FileJob:
+		return e.executeFile(ctx, v.ProposalID)
+	case ReminderJob:
+		return e.executeReminder(ctx, v.ItemID)
+	}
+	return fmt.Errorf("unknown job: %s", j.kind())
+}
+
+func (e *JobExecutor) executePropose(ctx context.Context, itemID int64) error {
+	it, err := e.Store.GetItemByID(itemID)
+	if err != nil {
+		return err
+	}
+	if it.Status == "cancelled" || it.Status == "archived" {
+		return nil
+	}
+
+	// 1. Load thread.
+	msgs, _, _, _ := e.Slack.GetConversationReplies(&slack.GetConversationRepliesParameters{ChannelID: it.SlackChannel, Timestamp: it.SlackTS})
+	var thread []string
+	for _, m := range msgs {
+		if m.User == e.BotUserID || m.Timestamp == it.SlackTS {
+			continue
+		}
+		thread = append(thread, m.Text)
+	}
+
+	// 2. Subproject (use override if present).
+	sub := it.Subproject
+	if sub == "" {
+		v, _ := detectSubproject(ctx, e.Projects, e.Claude, it.Text+"\n"+strings.Join(thread, "\n"))
+		sub = v
+		if sub != "" {
+			e.Store.UpdateItemSubproject(it.ID, sub)
+		}
+	}
+
+	// 3. Jira search.
+	keywords := extractKeywords(it.Text)
+	issues, _ := e.Jira.Search(JiraSearchInput{
+		Projects:   e.Projects.QORKProjects,
+		Subproject: sub,
+		Keywords:   keywords,
+		Limit:      20,
+	})
+
+	// 4. Classify relevance.
+	rels, _ := classifyRelatedTickets(ctx, e.Claude, it.Text, issues)
+	branch, existing := DecideBranch(rels)
+
+	// 5. Draft (skip for awaiting_resolution path).
+	var draft *Draft
+	if branch == "new" {
+		permalink, _ := e.Slack.GetPermalink(&slack.PermalinkParameters{Channel: it.SlackChannel, Ts: it.SlackTS})
+		priority, _ := e.Store.LatestOverride(it.ID, "priority_override")
+		d, err := DraftTicket(ctx, e.Claude, DraftInput{
+			Text:         it.Text,
+			Thread:       thread,
+			Subproject:   sub,
+			PriorityOver: priority,
+			Permalink:    permalink,
+		})
+		if err != nil {
+			return err
+		}
+		draft = d
+	}
+
+	// 6. Post proposal.
+	body := RenderProposalMessage(draft, rels, branch, existing, false)
+	_, ts, err := e.Slack.PostMessage(it.SlackChannel,
+		slack.MsgOptionText(body, false),
+		slack.MsgOptionTS(it.SlackTS))
+	if err != nil {
+		return err
+	}
+
+	// 7. Persist proposal row.
+	draftJSON, _ := json.Marshal(draft)
+	relsJSON, _ := json.Marshal(rels)
+	p := &Proposal{
+		ItemID:             it.ID,
+		SlackTS:            ts,
+		DraftJSON:          string(draftJSON),
+		RelatedTicketsJSON: string(relsJSON),
+		Branch:             branch,
+		ExistingTicketKey:  existing,
+		Status:             "draft",
+	}
+	if branch == "awaiting_resolution" {
+		p.Status = "awaiting_resolution"
+	}
+	e.Store.InsertProposal(p)
+	e.Store.UpdateItemStatus(it.ID, "proposed")
+	e.Store.LogEvent(&it.ID, "proposal", `{"branch":"`+branch+`"}`)
+	return nil
+}
+
+func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {
+	p, err := e.Store.GetLatestProposalByID(proposalID)
+	if err != nil {
+		return err
+	}
+	if p.Status != "draft" {
+		return nil
+	}
+	it, _ := e.Store.GetItemByID(p.ItemID)
+	if it == nil || isTerminal(it.Status) {
+		return nil
+	}
+
+	var draft Draft
+	json.Unmarshal([]byte(p.DraftJSON), &draft)
+	commentText := buildExistingTicketComment(it.Text, draft.Description)
+
+	projectKey := ""
+	if len(e.Projects.QORKProjects) > 0 {
+		projectKey = e.Projects.QORKProjects[0]
+	}
+	res, err := FileProposal(e.Jira, FileInput{
+		Branch:            p.Branch,
+		ProjectKey:        projectKey,
+		ExistingTicketKey: p.ExistingTicketKey,
+		CommentText:       commentText,
+		Draft:             &draft,
+	})
+	if err != nil {
+		e.Slack.PostMessage(it.SlackChannel,
+			slack.MsgOptionText(":warning: Failed to file ticket: "+err.Error(), false),
+			slack.MsgOptionTS(it.SlackTS))
+		return err
+	}
+
+	e.Store.UpdateProposalStatus(p.ID, "filed")
+	action := "created"
+	jiraKey := res.NewKey
+	jiraURL := res.NewURL
+	if p.Branch == "comment_on_existing" {
+		action = "commented_on_existing"
+		jiraKey = res.CommentedOn
+		jiraURL = ""
+	}
+	e.Store.InsertTicket(&Ticket{
+		ProposalID:        p.ID,
+		JiraKey:           jiraKey,
+		JiraURL:           jiraURL,
+		Action:            action,
+		ExistingTicketKey: p.ExistingTicketKey,
+	})
+
+	switch p.Branch {
+	case "new":
+		e.Store.UpdateItemStatus(it.ID, "ticketed")
+	case "comment_on_existing":
+		e.Store.UpdateItemStatus(it.ID, "commented_on_existing")
+	case "both":
+		e.Store.UpdateItemStatus(it.ID, "ticketed")
+	}
+
+	msg := "Filed: "
+	if res.NewKey != "" {
+		msg += fmt.Sprintf("<%s|%s>", res.NewURL, res.NewKey)
+	}
+	if res.CommentedOn != "" {
+		if res.NewKey != "" {
+			msg += " + "
+		}
+		msg += "commented on " + res.CommentedOn
+	}
+	e.Slack.PostMessage(it.SlackChannel, slack.MsgOptionText(msg, false), slack.MsgOptionTS(it.SlackTS))
+	e.Slack.AddReaction("white_check_mark", slack.ItemRef{Channel: it.SlackChannel, Timestamp: it.SlackTS})
+	return nil
+}
+
+func (e *JobExecutor) executeReminder(ctx context.Context, itemID int64) error {
+	// Reminder posting is driven by the ticker; this is reserved for manual triggers.
+	return nil
+}
+
+func buildExistingTicketComment(original, descPreview string) string {
+	return "*Deferred-work follow-up*\n\nOriginal Slack message:\n" + original + "\n\nSynthesized context:\n" + descPreview
+}
+
+// extractKeywords is a tiny stopword filter; the worker uses claude inference for tougher cases.
+func extractKeywords(text string) []string {
+	stop := map[string]bool{
+		"the": true, "a": true, "an": true, "is": true, "and": true, "or": true,
+		"to": true, "for": true, "of": true, "in": true, "on": true, "we": true,
+		"i": true, "this": true, "that": true, "be": true, "it": true, "by": true,
+		"with": true, "from": true, "as": true, "at": true, "should": true, "will": true,
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, w := range strings.Fields(strings.ToLower(text)) {
+		w = strings.Trim(w, ".,!?:;()[]{}\"'`")
+		if len(w) < 3 || stop[w] || seen[w] {
+			continue
+		}
+		out = append(out, w)
+		seen[w] = true
+		if len(out) >= 8 {
+			break
+		}
+	}
+	return out
 }
