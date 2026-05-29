@@ -68,3 +68,87 @@ func TestJira_Search_NoSubproject_OnlyUnlabeled(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestJira_CreateIssue(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/api/3/issue" || r.Method != "POST" {
+			t.Fatalf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		b, _ := io.ReadAll(r.Body)
+		var body struct {
+			Fields struct {
+				Project struct {
+					Key string `json:"key"`
+				} `json:"project"`
+				Summary   string `json:"summary"`
+				IssueType struct {
+					Name string `json:"name"`
+				} `json:"issuetype"`
+				Labels []string `json:"labels"`
+			} `json:"fields"`
+		}
+		json.Unmarshal(b, &body)
+		if body.Fields.Project.Key != "QORK" {
+			t.Errorf("project: %s", body.Fields.Project.Key)
+		}
+		if body.Fields.IssueType.Name != "Task" {
+			t.Errorf("type: %s", body.Fields.IssueType.Name)
+		}
+		if body.Fields.Summary != "do the thing" {
+			t.Errorf("summary: %s", body.Fields.Summary)
+		}
+		w.WriteHeader(201)
+		w.Write([]byte(`{"key":"QORK-99","self":"https://example/rest/api/3/issue/QORK-99"}`))
+	}))
+	defer srv.Close()
+	c := &JiraClient{BaseURL: srv.URL, Email: "u", Token: "t", HTTP: http.DefaultClient}
+	res, err := c.CreateIssue(CreateIssueInput{
+		ProjectKey:  "QORK",
+		Summary:     "do the thing",
+		Description: "details",
+		IssueType:   "Task",
+		Labels:      []string{"deferred-work", "qompass"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Key != "QORK-99" {
+		t.Fatalf("key: %s", res.Key)
+	}
+	if !strings.Contains(res.URL, "/browse/QORK-99") {
+		t.Fatalf("browse url: %s", res.URL)
+	}
+}
+
+func TestJira_AddComment(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/api/3/issue/QORK-5/comment" || r.Method != "POST" {
+			t.Fatalf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		w.WriteHeader(201)
+		w.Write([]byte(`{"id":"1"}`))
+	}))
+	defer srv.Close()
+	c := &JiraClient{BaseURL: srv.URL, Email: "u", Token: "t", HTTP: http.DefaultClient}
+	if err := c.AddComment("QORK-5", "follow-up: stuff"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestJira_AddLabel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/api/3/issue/QORK-5" || r.Method != "PUT" {
+			t.Fatalf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		b, _ := io.ReadAll(r.Body)
+		if !strings.Contains(string(b), `"add":"deferred-work-followup"`) {
+			t.Errorf("missing add op: %s", string(b))
+		}
+		w.WriteHeader(204)
+	}))
+	defer srv.Close()
+	c := &JiraClient{BaseURL: srv.URL, Email: "u", Token: "t", HTTP: http.DefaultClient}
+	if err := c.AddLabel("QORK-5", "deferred-work-followup"); err != nil {
+		t.Fatal(err)
+	}
+}
