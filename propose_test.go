@@ -156,6 +156,83 @@ func TestRenderProposalMessage_TTLBanner(t *testing.T) {
 	}
 }
 
+type fakeJira struct {
+	createdKey string
+	createdURL string
+	comments   []struct{ Key, Text string }
+	labels     []struct{ Key, Label string }
+}
+
+func (f *fakeJira) Search(in JiraSearchInput) ([]JiraIssue, error) { return nil, nil }
+func (f *fakeJira) CreateIssue(in CreateIssueInput) (*CreatedIssue, error) {
+	f.createdKey = "QORK-100"
+	f.createdURL = "https://x/browse/QORK-100"
+	return &CreatedIssue{Key: f.createdKey, URL: f.createdURL}, nil
+}
+func (f *fakeJira) AddComment(key, text string) error {
+	f.comments = append(f.comments, struct{ Key, Text string }{key, text})
+	return nil
+}
+func (f *fakeJira) AddLabel(key, label string) error {
+	f.labels = append(f.labels, struct{ Key, Label string }{key, label})
+	return nil
+}
+
+func TestFileProposal_NewBranchCreatesIssue(t *testing.T) {
+	j := &fakeJira{}
+	d := &Draft{Summary: "x", Description: "y", IssueType: "Task", Labels: []string{"deferred-work"}, Priority: "Medium"}
+	res, err := FileProposal(j, FileInput{
+		Branch:     "new",
+		ProjectKey: "QORK",
+		Draft:      d,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.NewKey != "QORK-100" {
+		t.Fatalf("key: %s", res.NewKey)
+	}
+}
+
+func TestFileProposal_CommentBranchAddsCommentAndLabel(t *testing.T) {
+	j := &fakeJira{}
+	res, err := FileProposal(j, FileInput{
+		Branch:            "comment_on_existing",
+		ExistingTicketKey: "QORK-5",
+		CommentText:       "deferred-work follow-up: ...",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.CommentedOn != "QORK-5" {
+		t.Fatalf("commented: %s", res.CommentedOn)
+	}
+	if len(j.comments) != 1 || j.comments[0].Key != "QORK-5" {
+		t.Fatalf("comment not made: %+v", j.comments)
+	}
+	if len(j.labels) != 1 || j.labels[0].Label != "deferred-work-followup" {
+		t.Fatalf("label not added: %+v", j.labels)
+	}
+}
+
+func TestFileProposal_BothBranchDoesBoth(t *testing.T) {
+	j := &fakeJira{}
+	d := &Draft{Summary: "x", Description: "y", IssueType: "Task", Labels: []string{"deferred-work"}, Priority: "Medium"}
+	res, err := FileProposal(j, FileInput{
+		Branch:            "both",
+		ProjectKey:        "QORK",
+		ExistingTicketKey: "QORK-5",
+		CommentText:       "context",
+		Draft:             d,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.NewKey == "" || res.CommentedOn == "" {
+		t.Fatalf("expected both, got %+v", res)
+	}
+}
+
 func TestDecideBranch(t *testing.T) {
 	cases := []struct {
 		name     string

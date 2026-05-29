@@ -36,6 +36,11 @@ type ProposeJob struct{ ItemID int64 }
 
 func (ProposeJob) kind() string { return "propose" }
 
+// FileJob queues filing of an approved proposal. Task 26 wires the execution.
+type FileJob struct{ ProposalID int64 }
+
+func (FileJob) kind() string { return "file" }
+
 type Router struct {
 	Store             *Store
 	Slack             SlackAPI
@@ -274,7 +279,24 @@ func (r *Router) maybeAdvanceToProposing(it *Item) {
 }
 
 func (r *Router) handleProposalReaction(e ReactionEvent, add bool) {
-	// Implemented in proposal-approval task.
+	if !add {
+		return
+	}
+	p, err := r.Store.GetProposalBySlackTS(e.TS)
+	if err != nil {
+		return
+	}
+	if p.Status != "draft" {
+		return
+	}
+	if !IsApproveReaction(r.Signals, e.Name) {
+		return
+	}
+	it, _ := r.Store.GetItemByID(p.ItemID)
+	if it == nil || isTerminal(it.Status) {
+		return
+	}
+	r.Worker.Submit(FileJob{ProposalID: p.ID})
 }
 
 func isTerminal(status string) bool {

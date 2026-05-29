@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -229,6 +230,62 @@ func RenderProposalMessage(d *Draft, rels []RelatedTicket, branch, existingKey s
 	}
 	b.WriteString("\n_React with any approve signal to file. `@bot regen` to revise._")
 	return b.String()
+}
+
+type jiraAPI interface {
+	Search(in JiraSearchInput) ([]JiraIssue, error)
+	CreateIssue(in CreateIssueInput) (*CreatedIssue, error)
+	AddComment(key, text string) error
+	AddLabel(key, label string) error
+}
+
+type FileInput struct {
+	Branch            string // new|comment_on_existing|both
+	ProjectKey        string
+	ExistingTicketKey string
+	CommentText       string // synthesized context for the existing-ticket branch
+	Draft             *Draft
+}
+
+type FileResult struct {
+	NewKey      string
+	NewURL      string
+	CommentedOn string
+}
+
+func FileProposal(j jiraAPI, in FileInput) (*FileResult, error) {
+	res := &FileResult{}
+	if in.Branch == "comment_on_existing" || in.Branch == "both" {
+		if in.ExistingTicketKey == "" {
+			return nil, errors.New("existing ticket key required for comment branch")
+		}
+		if err := j.AddComment(in.ExistingTicketKey, in.CommentText); err != nil {
+			return nil, err
+		}
+		if err := j.AddLabel(in.ExistingTicketKey, "deferred-work-followup"); err != nil {
+			return nil, err
+		}
+		res.CommentedOn = in.ExistingTicketKey
+	}
+	if in.Branch == "new" || in.Branch == "both" {
+		if in.Draft == nil {
+			return nil, errors.New("draft required for new-ticket branch")
+		}
+		created, err := j.CreateIssue(CreateIssueInput{
+			ProjectKey:  in.ProjectKey,
+			Summary:     in.Draft.Summary,
+			Description: in.Draft.Description,
+			IssueType:   in.Draft.IssueType,
+			Labels:      in.Draft.Labels,
+			Priority:    in.Draft.Priority,
+		})
+		if err != nil {
+			return nil, err
+		}
+		res.NewKey = created.Key
+		res.NewURL = created.URL
+	}
+	return res, nil
 }
 
 // DecideBranch picks the proposal branch from related-ticket classifications.
