@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -61,5 +62,54 @@ func TestDetectSubproject_ClaudeReturnsNone(t *testing.T) {
 	got, _ := detectSubproject(context.Background(), cfg, fc, "vague")
 	if got != "" {
 		t.Fatalf("expected empty fallback, got %q", got)
+	}
+}
+
+func TestClassifyRelatedTickets(t *testing.T) {
+	issues := []JiraIssue{
+		{Key: "QORK-1"}, {Key: "QORK-2"}, {Key: "QORK-3"},
+	}
+	fc := &fakeClaude{resp: `[
+		{"key":"QORK-1","verdict":"encompassed"},
+		{"key":"QORK-2","verdict":"referenced"},
+		{"key":"QORK-3","verdict":"unrelated"}
+	]`}
+	res, err := classifyRelatedTickets(context.Background(), fc, "work text", issues)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 3 {
+		t.Fatalf("len: %d", len(res))
+	}
+	if res[0].Verdict != "encompassed" || res[2].Verdict != "unrelated" {
+		t.Fatalf("verdicts: %+v", res)
+	}
+}
+
+func TestDecideBranch(t *testing.T) {
+	cases := []struct {
+		name     string
+		verdicts []string
+		want     string
+		existing string
+	}{
+		{"all unrelated", []string{"unrelated", "unrelated"}, "new", ""},
+		{"only referenced", []string{"referenced", "unrelated"}, "new", ""},
+		{"encompassed wins", []string{"encompassed", "referenced"}, "awaiting_resolution", "QORK-1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rels := make([]RelatedTicket, len(tc.verdicts))
+			for i, v := range tc.verdicts {
+				rels[i] = RelatedTicket{Key: fmt.Sprintf("QORK-%d", i+1), Verdict: v}
+			}
+			b, k := DecideBranch(rels)
+			if b != tc.want {
+				t.Fatalf("branch: got %s want %s", b, tc.want)
+			}
+			if b == "awaiting_resolution" && k != tc.existing {
+				t.Fatalf("existing: got %s want %s", k, tc.existing)
+			}
+		})
 	}
 }

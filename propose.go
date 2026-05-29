@@ -62,3 +62,57 @@ func containsLower(list []string, v string) bool {
 	}
 	return false
 }
+
+type RelatedTicket struct {
+	Key     string `json:"key"`
+	Summary string `json:"summary,omitempty"`
+	Verdict string `json:"verdict"` // encompassed|referenced|unrelated
+}
+
+func classifyRelatedTickets(ctx context.Context, c claudeAPI, workText string, issues []JiraIssue) ([]RelatedTicket, error) {
+	if len(issues) == 0 {
+		return nil, nil
+	}
+	summaries := make([]map[string]any, len(issues))
+	for i, iss := range issues {
+		summaries[i] = map[string]any{"key": iss.Key, "summary": iss.Fields.Summary}
+	}
+	payload, _ := json.Marshal(summaries)
+	prompt := fmt.Sprintf(`Classify each Jira ticket relative to this deferred-work item.
+
+WORK ITEM:
+%s
+
+TICKETS:
+%s
+
+For each ticket, return a JSON array of objects: {"key": "...", "verdict": "encompassed"|"referenced"|"unrelated"}
+- "encompassed": this ticket already covers the same scope of work; filing a new ticket would duplicate.
+- "referenced": this ticket touches related code/concepts but is not the same work.
+- "unrelated": no meaningful overlap.
+Only return the JSON array, no other text.`, workText, string(payload))
+	out, err := c.Run(ctx, prompt)
+	if err != nil {
+		return nil, err
+	}
+	jsonStr, err := ExtractJSON(out)
+	if err != nil {
+		return nil, err
+	}
+	var res []RelatedTicket
+	if err := json.Unmarshal([]byte(jsonStr), &res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// DecideBranch picks the proposal branch from related-ticket classifications.
+// Returns (branch, existingKey). existingKey is set only when branch == "awaiting_resolution".
+func DecideBranch(rels []RelatedTicket) (string, string) {
+	for _, r := range rels {
+		if r.Verdict == "encompassed" {
+			return "awaiting_resolution", r.Key
+		}
+	}
+	return "new", ""
+}
