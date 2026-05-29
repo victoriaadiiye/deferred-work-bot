@@ -1,7 +1,166 @@
 package main
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/slack-go/slack"
+	"github.com/slack-go/slack/slackevents"
+	"github.com/slack-go/slack/socketmode"
+)
 
 func main() {
-	fmt.Println("deferred-work-bot")
+	cfg, err := LoadConfig()
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	projects, err := LoadProjects("projects.yaml")
+	if err != nil {
+		log.Fatalf("projects.yaml: %v", err)
+	}
+	signals, err := LoadSignals("signals.yaml")
+	if err != nil {
+		log.Fatalf("signals.yaml: %v", err)
+	}
+	store, err := OpenStore(cfg.SQLitePath)
+	if err != nil {
+		log.Fatalf("store: %v", err)
+	}
+	defer store.Close()
+
+	api := slack.New(cfg.SlackBotToken,
+		slack.OptionAppLevelToken(cfg.SlackAppToken))
+	auth, err := api.AuthTest()
+	if err != nil {
+		log.Fatalf("auth: %v", err)
+	}
+	botID := auth.UserID
+	log.Printf("authenticated as %s (%s)", auth.User, botID)
+
+	jira := NewJiraClient(cfg.JiraBaseURL, cfg.JiraEmail, cfg.JiraAPIToken)
+	claudeRunner := NewClaudeRunner()
+
+	executor := &JobExecutor{
+		Store: store, Slack: api, Claude: claudeRunner, Jira: jira,
+		Projects: projects, Signals: signals, BotUserID: botID,
+	}
+	worker := NewWorker(cfg.Workers, cfg.QueueSize, WorkerDeps{
+		Execute: executor.Execute,
+		Logger:  log.Printf,
+	})
+	worker.Start()
+
+	watched := map[string]bool{}
+	for _, c := range cfg.WatchedChannels {
+		watched[c] = true
+	}
+	router := &Router{
+		Store: store, Slack: api, BotUserID: botID,
+		WatchedChannels: watched, ApprovalThreshold: cfg.ApprovalThreshold,
+		Signals: signals, Projects: projects, Worker: worker, Config: cfg,
+		Claude: claudeRunner,
+	}
+
+	tk := &Ticker{
+		Store: store, Slack: api,
+		ReminderEvery: time.Duration(cfg.ReminderIntervalDays) * 24 * time.Hour,
+		WarnAt:        time.Duration(cfg.WarningAtDays) * 24 * time.Hour,
+		ArchiveAt:     time.Duration(cfg.WarningAtDays+cfg.ArchiveGraceDays) * 24 * time.Hour,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go runTicker(ctx, tk)
+
+	health := NewHealthServer(HealthDeps{Store: store, Worker: worker, TriggerToken: cfg.TriggerToken})
+	go func() {
+		addr := fmt.Sprintf(":%d", cfg.HealthPort)
+		log.Printf("health listening on %s", addr)
+		if err := health.ListenAndServe(addr); err != nil {
+			log.Printf("health: %v", err)
+		}
+	}()
+
+	// Socket Mode event loop.
+	sm := socketmode.New(api)
+	go runSocketMode(ctx, sm, router)
+	go func() { sm.Run() }()
+
+	// Wait for signal.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+	log.Print("shutdown signal received")
+	cancel()
+	worker.Stop(60 * time.Second)
+	log.Print("shutdown complete")
+}
+
+func runTicker(ctx context.Context, tk *Ticker) {
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	tk.Tick(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			tk.Tick(ctx)
+		}
+	}
+}
+
+func runSocketMode(ctx context.Context, sm *socketmode.Client, r *Router) {
+	for evt := range sm.Events {
+		switch evt.Type {
+		case socketmode.EventTypeEventsAPI:
+			payload, ok := evt.Data.(slackevents.EventsAPIEvent)
+			if !ok {
+				continue
+			}
+			sm.Ack(*evt.Request)
+			handleEventsAPI(r, payload)
+		}
+	}
+}
+
+func handleEventsAPI(r *Router, e slackevents.EventsAPIEvent) {
+	switch e.Type {
+	case slackevents.CallbackEvent:
+		switch ev := e.InnerEvent.Data.(type) {
+		case *slackevents.MessageEvent:
+			r.HandleMessage(MessageEvent{
+				Channel:  ev.Channel,
+				TS:       ev.TimeStamp,
+				ThreadTS: ev.ThreadTimeStamp,
+				User:     ev.User,
+				Text:     ev.Text,
+			})
+		case *slackevents.AppMentionEvent:
+			r.HandleAppMention(MessageEvent{
+				Channel:  ev.Channel,
+				TS:       ev.TimeStamp,
+				ThreadTS: ev.ThreadTimeStamp,
+				User:     ev.User,
+				Text:     ev.Text,
+			})
+		case *slackevents.ReactionAddedEvent:
+			r.HandleReactionAdded(ReactionEvent{
+				User:    ev.User,
+				Channel: ev.Item.Channel,
+				TS:      ev.Item.Timestamp,
+				Name:    ev.Reaction,
+			})
+		case *slackevents.ReactionRemovedEvent:
+			r.HandleReactionRemoved(ReactionEvent{
+				User:    ev.User,
+				Channel: ev.Item.Channel,
+				TS:      ev.Item.Timestamp,
+				Name:    ev.Reaction,
+			})
+		}
+	}
 }
