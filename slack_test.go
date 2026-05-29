@@ -137,3 +137,73 @@ func TestRouter_NonWatchedChannelIgnored(t *testing.T) {
 		t.Fatal("non-watched channels should be ignored for top-level posts")
 	}
 }
+
+func TestRouter_ReactionAddedCountsAsVote(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	sig := &SignalsConfig{ApproveReactions: []string{"white_check_mark"}}
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	r.HandleReactionAdded(ReactionEvent{User: "U2", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	n, _ := store.CountVotes(it.ID)
+	if n != 1 {
+		t.Fatalf("expected 1 vote, got %d", n)
+	}
+}
+
+func TestRouter_AuthorReactionExcluded(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	sig := &SignalsConfig{ApproveReactions: []string{"white_check_mark"}}
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	r.HandleReactionAdded(ReactionEvent{User: "U_AUTHOR", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	n, _ := store.CountVotes(it.ID)
+	if n != 0 {
+		t.Fatalf("expected author vote excluded, got %d", n)
+	}
+}
+
+func TestRouter_BotReactionExcluded(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	sig := &SignalsConfig{ApproveReactions: []string{"white_check_mark"}}
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	r.HandleReactionAdded(ReactionEvent{User: "UBOT", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	n, _ := store.CountVotes(it.ID)
+	if n != 0 {
+		t.Fatalf("expected bot vote excluded, got %d", n)
+	}
+}
+
+func TestRouter_ReactionRemovedDecrements(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	sig := &SignalsConfig{ApproveReactions: []string{"white_check_mark"}}
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	r.HandleReactionAdded(ReactionEvent{User: "U2", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
+	r.HandleReactionRemoved(ReactionEvent{User: "U2", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	n, _ := store.CountVotes(it.ID)
+	if n != 0 {
+		t.Fatalf("expected 0 votes after removal, got %d", n)
+	}
+}
+
+func TestRouter_CancelReactionMarksCancelled(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	sig := &SignalsConfig{CancelReactions: []string{"x"}}
+	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	r.HandleReactionAdded(ReactionEvent{User: "U2", Channel: "C1", TS: "1700.1", Name: "x"})
+	it, _ := store.GetItemByTS("C1", "1700.1")
+	if it.Status != "cancelled" {
+		t.Fatalf("expected cancelled, got %s", it.Status)
+	}
+}
