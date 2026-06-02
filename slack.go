@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ type SlackAPI interface {
 	RemoveReaction(name string, item slack.ItemRef) error
 	GetConversationReplies(params *slack.GetConversationRepliesParameters) (msgs []slack.Message, hasMore bool, nextCursor string, err error)
 	GetPermalink(params *slack.PermalinkParameters) (string, error)
+	GetUserInfo(user string) (*slack.User, error)
 	AuthTest() (*slack.AuthTestResponse, error)
 }
 
@@ -25,6 +27,7 @@ type Router struct {
 	BotUserID         string
 	WatchedChannels   map[string]bool
 	ApprovalThreshold int
+	AuthorCanApprove  bool
 	Signals           *SignalsConfig
 	Projects          *ProjectsConfig
 	Worker            *Worker
@@ -69,8 +72,18 @@ func (r *Router) HandleMessage(e MessageEvent) {
 	if err := r.Store.InsertItem(it); err != nil {
 		return
 	}
-	r.Slack.AddReaction("eyes", slackItem(e.Channel, e.TS))
+	r.seedVoteReactions(e.Channel, e.TS)
 	r.Store.LogEvent(&it.ID, "created", "{}")
+	if r.Worker != nil {
+		r.Worker.Submit(IntakeJob{ItemID: it.ID})
+	}
+}
+
+// seedVoteReactions adds the approve/cancel reactions to a tracked message so
+// members can vote with a single click instead of hunting for an emoji.
+func (r *Router) seedVoteReactions(channel, ts string) {
+	r.Slack.AddReaction("white_check_mark", slackItem(channel, ts))
+	r.Slack.AddReaction("x", slackItem(channel, ts))
 }
 
 func (r *Router) handleThreadReply(e MessageEvent) {
@@ -104,7 +117,7 @@ func (r *Router) handleThreadReply(e MessageEvent) {
 	}
 
 	if ReplyHasApprove(r.Signals, text) {
-		if e.User == parent.AuthorSlackID {
+		if e.User == parent.AuthorSlackID && !r.AuthorCanApprove {
 			return
 		}
 		r.Store.UpsertVote(parent.ID, e.User, "reply", "keyword")
@@ -138,6 +151,8 @@ func (r *Router) dispatchCommand(it *Item, e MessageEvent) {
 		r.cmdProject(it, e, strings.TrimSpace(strings.TrimPrefix(cmd, "project:")))
 	case strings.HasPrefix(cmd, "priority:"):
 		r.cmdPriority(it, e, strings.TrimSpace(strings.TrimPrefix(cmd, "priority:")))
+	case strings.HasPrefix(cmd, "epic:"):
+		r.cmdEpic(it, e, strings.TrimSpace(strings.TrimPrefix(cmd, "epic:")))
 	default:
 		r.cmdFreeform(it, e, cmd)
 	}
@@ -200,6 +215,7 @@ const helpText = "*deferred-work-bot commands:*\n" +
 	"• `@bot regen` — re-draft proposal with latest thread context\n" +
 	"• `@bot project: <name>` — override sub-project label\n" +
 	"• `@bot priority: <low|medium|high>` — override priority\n" +
+	"• `@bot epic: <KEY|none>` — set/clear the parent epic\n" +
 	"• `@bot file now` — skip approval gate; propose immediately\n" +
 	"• `@bot search` — re-run related-ticket search\n" +
 	"• `@bot help` — this message\n" +
@@ -272,6 +288,30 @@ func (r *Router) cmdPriority(it *Item, e MessageEvent, v string) {
 		r.cmdRegen(it, e)
 	}
 }
+
+// issueKeyRe matches a Jira issue key like QORK-441 (uppercased before test).
+var issueKeyRe = regexp.MustCompile(`^[A-Z][A-Z0-9]+-[0-9]+$`)
+
+// cmdEpic records a human override of the parent epic. `none` forces no epic;
+// otherwise the value must look like an issue key. The override is re-applied
+// on the next proposal, so a proposed item is regenerated immediately.
+func (r *Router) cmdEpic(it *Item, e MessageEvent, v string) {
+	value := strings.ToUpper(strings.TrimSpace(v))
+	switch {
+	case value == "":
+		return
+	case value == "NONE":
+		value = "none"
+	case !issueKeyRe.MatchString(value):
+		return
+	}
+	r.Store.LogEvent(&it.ID, "epic_override", `{"value":"`+value+`","by":"`+e.User+`"}`)
+	r.Slack.AddReaction("white_check_mark", slackItem(e.Channel, e.TS))
+	if it.Status == "proposed" {
+		r.cmdRegen(it, e)
+	}
+}
+
 func (r *Router) cmdFreeform(it *Item, e MessageEvent, q string) {
 	if r.Claude == nil {
 		return
@@ -349,7 +389,7 @@ func (r *Router) HandleReactionAdded(e ReactionEvent) {
 	if !IsApproveReaction(r.Signals, e.Name) {
 		return
 	}
-	if e.User == it.AuthorSlackID {
+	if e.User == it.AuthorSlackID && !r.AuthorCanApprove {
 		return
 	}
 	r.Store.UpsertVote(it.ID, e.User, "reaction", e.Name)
@@ -474,6 +514,9 @@ func (r *Router) HandleAppMention(e MessageEvent) {
 	if err := r.Store.InsertItem(it); err != nil {
 		return
 	}
-	r.Slack.AddReaction("eyes", slackItem(e.Channel, e.TS))
+	r.seedVoteReactions(e.Channel, e.TS)
 	r.Store.LogEvent(&it.ID, "created", `{"via":"app_mention"}`)
+	if r.Worker != nil {
+		r.Worker.Submit(IntakeJob{ItemID: it.ID})
+	}
 }

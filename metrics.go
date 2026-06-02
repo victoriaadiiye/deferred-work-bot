@@ -26,6 +26,14 @@ func (mj *metricsJira) Search(in JiraSearchInput) ([]JiraIssue, error) {
 	return res, err
 }
 
+func (mj *metricsJira) SearchEpics(projects []string, limit int) ([]JiraIssue, error) {
+	res, err := mj.inner.SearchEpics(projects, limit)
+	if err != nil {
+		mj.metrics.IncJiraError()
+	}
+	return res, err
+}
+
 func (mj *metricsJira) CreateIssue(in CreateIssueInput) (*CreatedIssue, error) {
 	res, err := mj.inner.CreateIssue(in)
 	if err != nil {
@@ -48,6 +56,14 @@ func (mj *metricsJira) AddLabel(key, label string) error {
 		mj.metrics.IncJiraError()
 	}
 	return err
+}
+
+func (mj *metricsJira) FindAccountID(email string) (string, error) {
+	id, err := mj.inner.FindAccountID(email)
+	if err != nil {
+		mj.metrics.IncJiraError()
+	}
+	return id, err
 }
 
 // AppMetrics tracks simple job latency (sum+count per kind) and Jira error

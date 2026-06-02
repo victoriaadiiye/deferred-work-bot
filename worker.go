@@ -21,6 +21,12 @@ type ReminderJob struct{ ItemID int64 }
 
 func (ReminderJob) kind() string { return "reminder" }
 
+// IntakeJob posts the initial "picked up this proposal" status comment as soon
+// as an item is created, including the related-ticket check and vote count.
+type IntakeJob struct{ ItemID int64 }
+
+func (IntakeJob) kind() string { return "intake" }
+
 type WorkerDeps struct {
 	Execute func(ctx context.Context, j job) error
 	Logger  func(format string, args ...any)

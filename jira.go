@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -69,9 +70,27 @@ func (c *JiraClient) Search(in JiraSearchInput) ([]JiraIssue, error) {
 	if in.Limit == 0 {
 		in.Limit = 20
 	}
+	return c.searchJQL(c.BuildJQL(in), in.Limit)
+}
+
+// SearchEpics returns the open epics in the given projects, most-recently
+// updated first, so a deferred-work item can be matched to a likely parent.
+// Done epics are excluded — there is no point filing new work under them.
+func (c *JiraClient) SearchEpics(projects []string, limit int) ([]JiraIssue, error) {
+	if len(projects) == 0 {
+		return nil, nil
+	}
+	if limit == 0 {
+		limit = 50
+	}
+	jql := fmt.Sprintf("project in (%s) AND issuetype = Epic AND statusCategory != Done ORDER BY updated DESC", strings.Join(projects, ","))
+	return c.searchJQL(jql, limit)
+}
+
+func (c *JiraClient) searchJQL(jql string, limit int) ([]JiraIssue, error) {
 	body, _ := json.Marshal(map[string]any{
-		"jql":        c.BuildJQL(in),
-		"maxResults": in.Limit,
+		"jql":        jql,
+		"maxResults": limit,
 		"fields":     []string{"summary", "description", "labels", "status"},
 	})
 	req, _ := http.NewRequest("POST", c.BaseURL+"/rest/api/3/search", bytes.NewReader(body))
@@ -101,12 +120,14 @@ func (c *JiraClient) Search(in JiraSearchInput) ([]JiraIssue, error) {
 }
 
 type CreateIssueInput struct {
-	ProjectKey  string
-	Summary     string
-	Description string
-	IssueType   string
-	Labels      []string
-	Priority    string
+	ProjectKey        string
+	Summary           string
+	Description       string
+	IssueType         string
+	Labels            []string
+	Priority          string
+	AssigneeAccountID string
+	ParentEpicKey     string
 }
 
 type CreatedIssue struct {
@@ -126,6 +147,14 @@ func (c *JiraClient) CreateIssue(in CreateIssueInput) (*CreatedIssue, error) {
 	}
 	if in.Priority != "" {
 		fields["priority"] = map[string]any{"name": in.Priority}
+	}
+	if in.AssigneeAccountID != "" {
+		fields["assignee"] = map[string]any{"accountId": in.AssigneeAccountID}
+	}
+	// In team-managed (and modern company-managed) projects an epic is the
+	// child issue's parent, so the epic link is set via the parent field.
+	if in.ParentEpicKey != "" {
+		fields["parent"] = map[string]any{"key": in.ParentEpicKey}
 	}
 	body, _ := json.Marshal(map[string]any{"fields": fields})
 	req, _ := http.NewRequest("POST", c.BaseURL+"/rest/api/3/issue", bytes.NewReader(body))
@@ -188,19 +217,33 @@ func (c *JiraClient) AddLabel(issueKey, label string) error {
 	return nil
 }
 
-// adfFromText wraps a plain-text string in Atlassian Document Format, which
-// the Jira Cloud v3 API requires for description and comment bodies.
-func adfFromText(s string) map[string]any {
-	return map[string]any{
-		"type":    "doc",
-		"version": 1,
-		"content": []map[string]any{
-			{
-				"type": "paragraph",
-				"content": []map[string]any{
-					{"type": "text", "text": s},
-				},
-			},
-		},
+// FindAccountID resolves a Jira account ID from a user's email address. It
+// returns ("", nil) when no matching user is found so callers can treat an
+// unresolved assignee as a soft miss rather than an error.
+func (c *JiraClient) FindAccountID(email string) (string, error) {
+	if email == "" {
+		return "", nil
 	}
+	req, _ := http.NewRequest("GET", c.BaseURL+"/rest/api/3/user/search?query="+url.QueryEscape(email), nil)
+	req.SetBasicAuth(c.Email, c.Token)
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("user search %d: %s", resp.StatusCode, string(b))
+	}
+	var users []struct {
+		AccountID string `json:"accountId"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
+		return "", err
+	}
+	if len(users) == 0 {
+		return "", nil
+	}
+	return users[0].AccountID, nil
 }

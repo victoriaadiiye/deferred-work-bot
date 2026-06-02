@@ -16,6 +16,7 @@ type fakeSlack struct {
 	posted    []postedMsg
 	reactions []reactRef
 	replies   map[string][]slack.Message // keyed by ts
+	users     map[string]*slack.User     // keyed by user ID
 }
 
 type postedMsg struct {
@@ -66,8 +67,33 @@ func (f *fakeSlack) GetPermalink(p *slack.PermalinkParameters) (string, error) {
 	return "https://slack.example/archives/" + p.Channel + "/p" + p.Ts, nil
 }
 
+func (f *fakeSlack) GetUserInfo(user string) (*slack.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if u, ok := f.users[user]; ok {
+		return u, nil
+	}
+	return &slack.User{ID: user}, nil
+}
+
 func (f *fakeSlack) AuthTest() (*slack.AuthTestResponse, error) {
 	return &slack.AuthTestResponse{UserID: f.botID}, nil
+}
+
+// nextJobOfType drains the worker queue and returns the first job of type T,
+// skipping others — notably the IntakeJob enqueued when an item is created.
+func nextJobOfType[T job](w *Worker) (T, bool) {
+	var zero T
+	for {
+		select {
+		case j := <-w.queue:
+			if v, ok := j.(T); ok {
+				return v, true
+			}
+		default:
+			return zero, false
+		}
+	}
 }
 
 func generateTS(n int) string { return "1700000000.00010" + string(rune('0'+n%10)) }
@@ -112,8 +138,8 @@ func TestRouter_NewItemInWatchedChannel(t *testing.T) {
 	if it.Status != "collecting" {
 		t.Fatalf("status: %s", it.Status)
 	}
-	if len(fake.reactions) != 1 || fake.reactions[0].Name != "eyes" {
-		t.Fatalf("expected :eyes: reaction, got %+v", fake.reactions)
+	if len(fake.reactions) != 2 || fake.reactions[0].Name != "white_check_mark" || fake.reactions[1].Name != "x" {
+		t.Fatalf("expected :white_check_mark: + :x: reactions, got %+v", fake.reactions)
 	}
 }
 
@@ -335,7 +361,7 @@ func TestCmdStatus_ReportsCounts(t *testing.T) {
 func TestCmdFileNow_TransitionsToProposing(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
-	w := &Worker{queue: make(chan job, 1)}
+	w := &Worker{queue: make(chan job, 4)}
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3, Worker: w}
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> file now"})
@@ -343,9 +369,7 @@ func TestCmdFileNow_TransitionsToProposing(t *testing.T) {
 	if it.Status != "proposing" {
 		t.Fatalf("status: %s", it.Status)
 	}
-	select {
-	case <-w.queue:
-	default:
+	if _, ok := nextJobOfType[ProposeJob](w); !ok {
 		t.Fatal("expected ProposeJob enqueued")
 	}
 }
@@ -393,12 +417,7 @@ func TestCmdProject_TriggersRegenOnProposedItem(t *testing.T) {
 
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> project: nexus"})
 
-	select {
-	case j := <-w.queue:
-		if _, ok := j.(ProposeJob); !ok {
-			t.Fatalf("expected ProposeJob, got %T", j)
-		}
-	default:
+	if _, ok := nextJobOfType[ProposeJob](w); !ok {
 		t.Fatal("expected ProposeJob enqueued after project override on proposed item")
 	}
 	// Old proposal should be rejected.
@@ -420,12 +439,7 @@ func TestCmdPriority_TriggersRegenOnProposedItem(t *testing.T) {
 
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> priority: high"})
 
-	select {
-	case j := <-w.queue:
-		if _, ok := j.(ProposeJob); !ok {
-			t.Fatalf("expected ProposeJob, got %T", j)
-		}
-	default:
+	if _, ok := nextJobOfType[ProposeJob](w); !ok {
 		t.Fatal("expected ProposeJob enqueued after priority override on proposed item")
 	}
 	// Old proposal should be rejected.
@@ -438,16 +452,14 @@ func TestCmdPriority_TriggersRegenOnProposedItem(t *testing.T) {
 func TestCmdRegen_EnqueuesProposeJob(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
-	w := &Worker{queue: make(chan job, 1)}
+	w := &Worker{queue: make(chan job, 4)}
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3, Worker: w}
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	store.UpdateItemStatus(it.ID, "proposed")
 	store.InsertProposal(&Proposal{ItemID: it.ID, SlackTS: "1700.x", DraftJSON: "{}", RelatedTicketsJSON: "[]", Branch: "new", Status: "draft"})
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> regen"})
-	select {
-	case <-w.queue:
-	default:
+	if _, ok := nextJobOfType[ProposeJob](w); !ok {
 		t.Fatal("expected ProposeJob enqueued")
 	}
 	// Old proposal marked rejected.
@@ -508,17 +520,12 @@ func TestRouter_ProposalReactionFilesViaWorker(t *testing.T) {
 	// Reaction added on the proposal message ts — should route through handleProposalReaction.
 	r.HandleReactionAdded(ReactionEvent{User: "U2", Channel: "C1", TS: "1700.prop", Name: "white_check_mark"})
 
-	select {
-	case j := <-w.queue:
-		fj, ok := j.(FileJob)
-		if !ok {
-			t.Fatalf("expected FileJob, got %T", j)
-		}
-		if fj.ProposalID != p.ID {
-			t.Fatalf("expected proposalID %d, got %d", p.ID, fj.ProposalID)
-		}
-	default:
+	fj, ok := nextJobOfType[FileJob](w)
+	switch {
+	case !ok:
 		t.Fatal("expected FileJob to be enqueued")
+	case fj.ProposalID != p.ID:
+		t.Fatalf("expected proposalID %d, got %d", p.ID, fj.ProposalID)
 	}
 }
 

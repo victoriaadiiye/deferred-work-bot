@@ -124,6 +124,56 @@ type Draft struct {
 	IssueType   string   `json:"issue_type"`
 	Labels      []string `json:"labels"`
 	Priority    string   `json:"priority"`
+	// EpicKey/EpicSummary record the parent epic the bot matched this work to;
+	// EpicKey becomes the new issue's parent at filing time. Both are populated
+	// by the bot (not the model), hence omitempty.
+	EpicKey     string `json:"epic_key,omitempty"`
+	EpicSummary string `json:"epic_summary,omitempty"`
+}
+
+// classifyEpic asks the model which open epic the work item best belongs to.
+// It returns "" when no epic is a clear fit, and validates the answer against
+// the candidate keys so a hallucinated key can never reach Jira.
+func classifyEpic(ctx context.Context, c claudeAPI, workText string, epics []JiraIssue) (string, error) {
+	if len(epics) == 0 {
+		return "", nil
+	}
+	list := make([]map[string]any, len(epics))
+	for i, ep := range epics {
+		list[i] = map[string]any{"key": ep.Key, "summary": ep.Fields.Summary}
+	}
+	payload, _ := json.Marshal(list)
+	prompt := fmt.Sprintf(`You are assigning a deferred-work item to the most appropriate epic.
+
+WORK ITEM:
+%s
+
+EPICS:
+%s
+
+Return JSON: {"epic": "<the epic key that best fits, or an empty string if none is a clear fit>"}
+Choose an epic only when the work item clearly belongs to its theme. When in doubt, return "".
+Only return the JSON, no other text.`, workText, string(payload))
+	out, err := c.Run(ctx, prompt)
+	if err != nil {
+		return "", err
+	}
+	js, err := ExtractJSON(out)
+	if err != nil {
+		return "", nil // fail soft — no epic
+	}
+	var parsed struct {
+		Epic string `json:"epic"`
+	}
+	if err := json.Unmarshal([]byte(js), &parsed); err != nil {
+		return "", nil
+	}
+	for _, ep := range epics {
+		if ep.Key == parsed.Epic {
+			return ep.Key, nil
+		}
+	}
+	return "", nil
 }
 
 func DraftTicket(ctx context.Context, c claudeAPI, in DraftInput) (*Draft, error) {
@@ -199,6 +249,43 @@ func ensureLabels(labels []string, required ...string) []string {
 	return out
 }
 
+// RenderIntakeMessage builds the status comment posted right after an item is
+// created: it acknowledges the proposal, reports whether the work looks new or
+// overlaps an existing ticket, surfaces related tickets, and shows the vote
+// count against the approval threshold.
+func RenderIntakeMessage(rels []RelatedTicket, branch, existing, epicKey, epicSummary string, votes, threshold int) string {
+	var b strings.Builder
+	b.WriteString(":wave: *Picked up this proposal* — I'll file it to Jira once it clears the approval gate.\n\n")
+	if branch == "awaiting_resolution" && existing != "" {
+		fmt.Fprintf(&b, "This may already be covered by <%s|%s>. If it's approved I'll ask whether to comment on that ticket, file a fresh one, or both.\n", existing, existing)
+	} else {
+		b.WriteString("Looks *new* — I didn't find an existing ticket that already covers this.\n")
+	}
+	if epicKey != "" {
+		if epicSummary != "" {
+			fmt.Fprintf(&b, "*Epic:* %s — %s (reply `@bot epic: <KEY>` to change, `@bot epic: none` to skip).\n", epicKey, epicSummary)
+		} else {
+			fmt.Fprintf(&b, "*Epic:* %s (reply `@bot epic: <KEY>` to change, `@bot epic: none` to skip).\n", epicKey)
+		}
+	} else {
+		b.WriteString("*Epic:* none found — reply `@bot epic: <KEY>` to set one.\n")
+	}
+	var related []RelatedTicket
+	for _, r := range rels {
+		if r.Verdict == "referenced" {
+			related = append(related, r)
+		}
+	}
+	if len(related) > 0 {
+		b.WriteString("\n*Possibly related:*\n")
+		for _, r := range related {
+			fmt.Fprintf(&b, "• <%s|%s>\n", r.Key, r.Key)
+		}
+	}
+	fmt.Fprintf(&b, "\n*%d/%d approvals.* React :white_check_mark: to approve or :x: to cancel.", votes, threshold)
+	return b.String()
+}
+
 // RenderProposalMessage builds the Slack message body for a deferred-work proposal.
 func RenderProposalMessage(d *Draft, rels []RelatedTicket, branch, existingKey string, ttlTriggered bool) string {
 	var b strings.Builder
@@ -221,6 +308,13 @@ func RenderProposalMessage(d *Draft, rels []RelatedTicket, branch, existingKey s
 			fmt.Fprintf(&b, "*Description preview:*\n```\n%s\n```\n", desc)
 		}
 		fmt.Fprintf(&b, "*Labels:* %s\n", strings.Join(d.Labels, ", "))
+		if d.EpicKey != "" {
+			if d.EpicSummary != "" {
+				fmt.Fprintf(&b, "*Epic:* %s — %s\n", d.EpicKey, d.EpicSummary)
+			} else {
+				fmt.Fprintf(&b, "*Epic:* %s\n", d.EpicKey)
+			}
+		}
 	}
 	if len(rels) > 0 {
 		b.WriteString("\n*Related tickets:*\n")
@@ -237,9 +331,11 @@ func RenderProposalMessage(d *Draft, rels []RelatedTicket, branch, existingKey s
 
 type jiraAPI interface {
 	Search(in JiraSearchInput) ([]JiraIssue, error)
+	SearchEpics(projects []string, limit int) ([]JiraIssue, error)
 	CreateIssue(in CreateIssueInput) (*CreatedIssue, error)
 	AddComment(key, text string) error
 	AddLabel(key, label string) error
+	FindAccountID(email string) (string, error)
 }
 
 type FileInput struct {
@@ -248,6 +344,7 @@ type FileInput struct {
 	ExistingTicketKey string
 	CommentText       string // synthesized context for the existing-ticket branch
 	Draft             *Draft
+	AssigneeAccountID string // Jira account ID of the proposal author, if resolved
 }
 
 type FileResult struct {
@@ -275,12 +372,14 @@ func FileProposal(j jiraAPI, in FileInput) (*FileResult, error) {
 			return nil, errors.New("draft required for new-ticket branch")
 		}
 		created, err := j.CreateIssue(CreateIssueInput{
-			ProjectKey:  in.ProjectKey,
-			Summary:     in.Draft.Summary,
-			Description: in.Draft.Description,
-			IssueType:   in.Draft.IssueType,
-			Labels:      in.Draft.Labels,
-			Priority:    in.Draft.Priority,
+			ProjectKey:        in.ProjectKey,
+			Summary:           in.Draft.Summary,
+			Description:       in.Draft.Description,
+			IssueType:         in.Draft.IssueType,
+			Labels:            in.Draft.Labels,
+			Priority:          in.Draft.Priority,
+			AssigneeAccountID: in.AssigneeAccountID,
+			ParentEpicKey:     in.Draft.EpicKey,
 		})
 		if err != nil {
 			return nil, err
@@ -320,8 +419,126 @@ func (e *JobExecutor) Execute(ctx context.Context, j job) error {
 		return e.executeFile(ctx, v.ProposalID)
 	case ReminderJob:
 		return e.executeReminder(ctx, v.ItemID)
+	case IntakeJob:
+		return e.executeIntake(ctx, v.ItemID)
 	}
 	return fmt.Errorf("unknown job: %s", j.kind())
+}
+
+// proposalContext holds the result of the "is this new?" analysis: the thread,
+// the detected sub-project, the related-ticket classifications, and the chosen
+// branch. It is shared by the intake comment and the full propose flow.
+type proposalContext struct {
+	Thread      []string
+	Sub         string
+	Rels        []RelatedTicket
+	Branch      string
+	Existing    string
+	EpicKey     string
+	EpicSummary string
+}
+
+// detectEpic resolves the parent epic for an item. A human override
+// (`@bot epic: KEY`, or `@bot epic: none` to force no epic) wins; otherwise it
+// classifies the work against the project's open epics. Returns ("", "") when
+// no epic applies.
+func (e *JobExecutor) detectEpic(ctx context.Context, it *Item) (key, summary string) {
+	switch ov, _ := e.Store.LatestOverride(it.ID, "epic_override"); ov {
+	case "":
+		// fall through to classification
+	case "none":
+		return "", ""
+	default:
+		return ov, ""
+	}
+	epics, err := e.Jira.SearchEpics(e.Projects.QORKProjects, 50)
+	if err != nil || len(epics) == 0 {
+		return "", ""
+	}
+	k, _ := classifyEpic(ctx, e.Claude, it.Text, epics)
+	if k == "" {
+		return "", ""
+	}
+	for _, ep := range epics {
+		if ep.Key == k {
+			return k, ep.Fields.Summary
+		}
+	}
+	return k, ""
+}
+
+// gatherContext loads the thread, detects the sub-project, searches Jira, and
+// classifies related tickets. It persists a freshly-detected sub-project so
+// later runs reuse it.
+func (e *JobExecutor) gatherContext(ctx context.Context, it *Item) proposalContext {
+	msgs, _, _, _ := e.Slack.GetConversationReplies(&slack.GetConversationRepliesParameters{ChannelID: it.SlackChannel, Timestamp: it.SlackTS})
+	var thread []string
+	for _, m := range msgs {
+		if m.User == e.BotUserID || m.Timestamp == it.SlackTS {
+			continue
+		}
+		thread = append(thread, m.Text)
+	}
+
+	sub := it.Subproject
+	if sub == "" {
+		v, _ := detectSubproject(ctx, e.Projects, e.Claude, it.Text+"\n"+strings.Join(thread, "\n"))
+		sub = v
+		if sub != "" {
+			e.Store.UpdateItemSubproject(it.ID, sub)
+		}
+	}
+
+	issues, _ := e.Jira.Search(JiraSearchInput{
+		Projects:   e.Projects.QORKProjects,
+		Subproject: sub,
+		Keywords:   extractKeywords(it.Text),
+		Limit:      20,
+	})
+
+	rels, _ := classifyRelatedTickets(ctx, e.Claude, it.Text, issues)
+	branch, existing := DecideBranch(rels)
+	epicKey, epicSummary := e.detectEpic(ctx, it)
+	return proposalContext{
+		Thread: thread, Sub: sub, Rels: rels, Branch: branch, Existing: existing,
+		EpicKey: epicKey, EpicSummary: epicSummary,
+	}
+}
+
+// executeIntake posts the initial status comment as soon as an item is created:
+// it acknowledges the proposal, runs the "is this new?" check, surfaces any
+// related-ticket context, and reports the current vote count.
+func (e *JobExecutor) executeIntake(ctx context.Context, itemID int64) error {
+	it, err := e.Store.GetItemByID(itemID)
+	if err != nil {
+		return err
+	}
+	if isTerminal(it.Status) {
+		return nil
+	}
+	pc := e.gatherContext(ctx, it)
+	n, _ := e.Store.CountVotes(it.ID)
+	body := RenderIntakeMessage(pc.Rels, pc.Branch, pc.Existing, pc.EpicKey, pc.EpicSummary, n, it.ApprovalThreshold)
+	e.Slack.PostMessage(it.SlackChannel,
+		slack.MsgOptionText(body, false),
+		slack.MsgOptionTS(it.SlackTS))
+	e.Store.LogEvent(&it.ID, "intake", `{}`)
+	return nil
+}
+
+// resolveAssignee maps a Slack user to a Jira account ID via their email
+// address, returning "" when it cannot be resolved (unknown user, missing
+// email scope, or no matching Jira account).
+func (e *JobExecutor) resolveAssignee(slackUserID string) string {
+	if slackUserID == "" {
+		return ""
+	}
+	u, err := e.Slack.GetUserInfo(slackUserID)
+	if err != nil || u == nil || u.Profile.Email == "" {
+		return ""
+	}
+	id, _ := e.Jira.FindAccountID(u.Profile.Email)
+	return id
 }
 
 func (e *JobExecutor) executePropose(ctx context.Context, itemID int64) error {
@@ -333,38 +550,9 @@ func (e *JobExecutor) executePropose(ctx context.Context, itemID int64) error {
 		return nil
 	}
 
-	// 1. Load thread.
-	msgs, _, _, _ := e.Slack.GetConversationReplies(&slack.GetConversationRepliesParameters{ChannelID: it.SlackChannel, Timestamp: it.SlackTS})
-	var thread []string
-	for _, m := range msgs {
-		if m.User == e.BotUserID || m.Timestamp == it.SlackTS {
-			continue
-		}
-		thread = append(thread, m.Text)
-	}
-
-	// 2. Subproject (use override if present).
-	sub := it.Subproject
-	if sub == "" {
-		v, _ := detectSubproject(ctx, e.Projects, e.Claude, it.Text+"\n"+strings.Join(thread, "\n"))
-		sub = v
-		if sub != "" {
-			e.Store.UpdateItemSubproject(it.ID, sub)
-		}
-	}
-
-	// 3. Jira search.
-	keywords := extractKeywords(it.Text)
-	issues, _ := e.Jira.Search(JiraSearchInput{
-		Projects:   e.Projects.QORKProjects,
-		Subproject: sub,
-		Keywords:   keywords,
-		Limit:      20,
-	})
-
-	// 4. Classify relevance.
-	rels, _ := classifyRelatedTickets(ctx, e.Claude, it.Text, issues)
-	branch, existing := DecideBranch(rels)
+	// 1-4. Load thread, detect sub-project, search + classify related tickets.
+	pc := e.gatherContext(ctx, it)
+	thread, sub, rels, branch, existing := pc.Thread, pc.Sub, pc.Rels, pc.Branch, pc.Existing
 
 	// 5. Draft (skip for awaiting_resolution path).
 	var draft *Draft
@@ -381,6 +569,8 @@ func (e *JobExecutor) executePropose(ctx context.Context, itemID int64) error {
 		if err != nil {
 			return err
 		}
+		d.EpicKey = pc.EpicKey
+		d.EpicSummary = pc.EpicSummary
 		draft = d
 	}
 
@@ -455,6 +645,11 @@ func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {
 		}
 		draft = *d
 	}
+	// Ensure a parent epic is resolved — covers the re-draft path above, where
+	// the original proposal was filed without one.
+	if draft.EpicKey == "" {
+		draft.EpicKey, draft.EpicSummary = e.detectEpic(ctx, it)
+	}
 
 	commentText := buildExistingTicketComment(it.Text, draft.Description)
 
@@ -468,6 +663,7 @@ func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {
 		ExistingTicketKey: p.ExistingTicketKey,
 		CommentText:       commentText,
 		Draft:             &draft,
+		AssigneeAccountID: e.resolveAssignee(it.AuthorSlackID),
 	})
 	if err != nil {
 		e.Slack.PostMessage(it.SlackChannel,

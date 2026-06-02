@@ -162,6 +162,9 @@ type fakeJira struct {
 	comments   []struct{ Key, Text string }
 	labels     []struct{ Key, Label string }
 	failSearch bool
+	accountID  string
+	epics      []JiraIssue
+	lastCreate CreateIssueInput
 }
 
 func (f *fakeJira) Search(in JiraSearchInput) ([]JiraIssue, error) {
@@ -170,7 +173,11 @@ func (f *fakeJira) Search(in JiraSearchInput) ([]JiraIssue, error) {
 	}
 	return nil, nil
 }
+func (f *fakeJira) SearchEpics(projects []string, limit int) ([]JiraIssue, error) {
+	return f.epics, nil
+}
 func (f *fakeJira) CreateIssue(in CreateIssueInput) (*CreatedIssue, error) {
+	f.lastCreate = in
 	f.createdKey = "QORK-100"
 	f.createdURL = "https://x/browse/QORK-100"
 	return &CreatedIssue{Key: f.createdKey, URL: f.createdURL}, nil
@@ -182,6 +189,9 @@ func (f *fakeJira) AddComment(key, text string) error {
 func (f *fakeJira) AddLabel(key, label string) error {
 	f.labels = append(f.labels, struct{ Key, Label string }{key, label})
 	return nil
+}
+func (f *fakeJira) FindAccountID(email string) (string, error) {
+	return f.accountID, nil
 }
 
 func TestFileProposal_NewBranchCreatesIssue(t *testing.T) {
