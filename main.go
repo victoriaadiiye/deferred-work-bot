@@ -74,6 +74,7 @@ func main() {
 	router := &Router{
 		Store: store, Slack: api, BotUserID: botID,
 		WatchedChannels: watched, ApprovalThreshold: cfg.ApprovalThreshold,
+		AuthorCanApprove: cfg.AuthorCanApprove,
 		Signals: signals, Projects: projects, Worker: worker, Config: cfg,
 		Claude:           claudeRunner,
 		ReminderInterval: time.Duration(cfg.ReminderIntervalDays) * 24 * time.Hour,

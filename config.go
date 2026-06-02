@@ -19,6 +19,7 @@ type Config struct {
 	JiraAPIToken         string
 	JiraQORKProjects     []string
 	ApprovalThreshold    int
+	AuthorCanApprove     bool
 	ReminderIntervalDays int
 	WarningAtDays        int
 	ArchiveGraceDays     int
@@ -52,6 +53,7 @@ func LoadConfig() (*Config, error) {
 		JiraAPIToken:         os.Getenv("JIRA_API_TOKEN"),
 		JiraQORKProjects:     splitCSV(os.Getenv("JIRA_QORK_PROJECTS")),
 		ApprovalThreshold:    intEnv("APPROVAL_THRESHOLD", 3),
+		AuthorCanApprove:     boolEnv("AUTHOR_CAN_APPROVE", false),
 		ReminderIntervalDays: intEnv("REMINDER_INTERVAL_DAYS", 3),
 		WarningAtDays:        intEnv("WARNING_AT_DAYS", 10),
 		ArchiveGraceDays:     intEnv("ARCHIVE_GRACE_DAYS", 3),
@@ -88,6 +90,18 @@ func intEnv(k string, def int) int {
 		return def
 	}
 	return n
+}
+
+func boolEnv(k string, def bool) bool {
+	v := os.Getenv(k)
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return def
+	}
+	return b
 }
 
 func defaultStr(v, def string) string {
