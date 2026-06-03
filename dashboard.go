@@ -27,7 +27,12 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// filter is the status class to show; empty means the default view
+	// (everything except cancelled, which is hidden until its tile is clicked).
+	filter := r.URL.Query().Get("status")
+
 	var counts [6]int
+	statClasses := []string{"collecting", "proposing", "ticketed", "commented", "cancelled", "archived"}
 	for _, row := range rows {
 		switch row.Status {
 		case "collecting":
@@ -45,21 +50,40 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Select which rows to display. Counts above always reflect all items.
+	var visible []DashboardRow
+	for _, row := range rows {
+		if filter != "" {
+			if statusMatches(row.Status, filter) {
+				visible = append(visible, row)
+			}
+		} else if row.Status != "cancelled" {
+			visible = append(visible, row)
+		}
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, pageHead)
 	fmt.Fprintf(w, `<div class="stats">`)
 	statLabels := []string{"Collecting", "Proposing", "Ticketed", "Commented", "Cancelled", "Archived"}
-	statClasses := []string{"collecting", "proposing", "ticketed", "commented", "cancelled", "archived"}
 	for i, label := range statLabels {
-		fmt.Fprintf(w, `<div class="stat-card %s"><div class="stat-num">%d</div><div class="stat-label">%s</div></div>`, statClasses[i], counts[i], label)
+		active := ""
+		if filter == statClasses[i] {
+			active = " active"
+		}
+		fmt.Fprintf(w, `<a class="stat-card %s%s" href="?status=%s"><div class="stat-num">%d</div><div class="stat-label">%s</div></a>`, statClasses[i], active, statClasses[i], counts[i], label)
 	}
 	fmt.Fprint(w, `</div>`)
+
+	if filter != "" {
+		fmt.Fprint(w, `<p class="filter-note">Filtering by <strong>`+html.EscapeString(filter)+`</strong>. <a href="/">Show all</a></p>`)
+	}
 
 	fmt.Fprint(w, `<table><thead><tr>`)
 	fmt.Fprint(w, `<th>Status</th><th>Text</th><th>Subproject</th><th>Jira</th><th>Epic</th><th>Age</th>`)
 	fmt.Fprint(w, `</tr></thead><tbody>`)
 
-	for _, row := range rows {
+	for _, row := range visible {
 		statusClass := row.Status
 		if statusClass == "commented_on_existing" {
 			statusClass = "commented"
@@ -106,10 +130,27 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Fprint(w, `</tbody></table>`)
-	if len(rows) == 0 {
-		fmt.Fprint(w, `<p class="empty">No deferred work items yet.</p>`)
+	if len(visible) == 0 {
+		if filter != "" {
+			fmt.Fprint(w, `<p class="empty">No items with this status.</p>`)
+		} else {
+			fmt.Fprint(w, `<p class="empty">No deferred work items yet.</p>`)
+		}
 	}
 	fmt.Fprint(w, pageFooter)
+}
+
+// statusMatches reports whether a stored item status belongs to the given
+// dashboard status class (the short names used by the stat tiles).
+func statusMatches(status, class string) bool {
+	switch class {
+	case "proposing":
+		return status == "proposing" || status == "proposed"
+	case "commented":
+		return status == "commented_on_existing"
+	default:
+		return status == class
+	}
 }
 
 func formatAge(d time.Duration) string {
@@ -149,7 +190,14 @@ const pageHead = `<!DOCTYPE html>
     padding: 1rem 1.5rem;
     min-width: 120px;
     text-align: center;
+    text-decoration: none;
+    color: inherit;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
   }
+  .stat-card:hover { border-color: #58a6ff; text-decoration: none; }
+  .stat-card.active { border-color: #58a6ff; background: #1c2128; }
+  .filter-note { margin-bottom: 1rem; color: #8b949e; font-size: 0.9rem; }
   .stat-num { font-size: 2rem; font-weight: 700; }
   .stat-label { font-size: 0.8rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.05em; }
   .stat-card.collecting .stat-num { color: #f0883e; }
