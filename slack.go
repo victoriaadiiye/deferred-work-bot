@@ -20,7 +20,6 @@ type SlackAPI interface {
 	AuthTest() (*slack.AuthTestResponse, error)
 }
 
-
 type Router struct {
 	Store             *Store
 	Slack             SlackAPI
@@ -34,6 +33,7 @@ type Router struct {
 	Config            *Config
 	Claude            claudeAPI
 	ReminderInterval  time.Duration
+	ProposalMinWords  int
 }
 
 type MessageEvent struct {
@@ -61,29 +61,53 @@ func (r *Router) HandleMessage(e MessageEvent) {
 		// future: mark cancelled
 		return
 	}
+	// Cheap prefilter on the event path; the real proposal/not-a-proposal call is
+	// made by Claude inside ClassifyJob so we never block the Slack loop on it.
+	// The item (and its vote reactions) is created only once the judge says yes.
+	if !looksLikeProposal(e.Text, r.ProposalMinWords) {
+		return
+	}
+	if r.Worker != nil {
+		r.Worker.Submit(ClassifyJob{
+			Channel:           e.Channel,
+			TS:                e.TS,
+			User:              e.User,
+			Text:              e.Text,
+			ApprovalThreshold: r.ApprovalThreshold,
+		})
+	}
+}
+
+// materializeItem creates a tracked item for a message that has been accepted as
+// a proposal: it inserts the row, seeds the approve/cancel vote reactions so
+// members can vote with one click, logs creation, and queues intake. Shared by
+// the app-mention path and the classifier job so the two stay in lockstep. It is
+// a no-op (returning a nil item) when the message is already tracked, which
+// guards against duplicate Slack event delivery.
+func materializeItem(store *Store, slk SlackAPI, w *Worker, e MessageEvent, threshold int, via string) (*Item, error) {
+	if _, err := store.GetItemByTS(e.Channel, e.TS); err == nil {
+		return nil, nil
+	}
 	it := &Item{
 		SlackChannel:      e.Channel,
 		SlackTS:           e.TS,
 		AuthorSlackID:     e.User,
 		Text:              e.Text,
 		Status:            "collecting",
-		ApprovalThreshold: r.ApprovalThreshold,
+		ApprovalThreshold: threshold,
 	}
-	if err := r.Store.InsertItem(it); err != nil {
-		return
+	if err := store.InsertItem(it); err != nil {
+		return nil, err
 	}
-	r.seedVoteReactions(e.Channel, e.TS)
-	r.Store.LogEvent(&it.ID, "created", "{}")
-	if r.Worker != nil {
-		r.Worker.Submit(IntakeJob{ItemID: it.ID})
+	if slk != nil {
+		slk.AddReaction("white_check_mark", slackItem(e.Channel, e.TS))
+		slk.AddReaction("x", slackItem(e.Channel, e.TS))
 	}
-}
-
-// seedVoteReactions adds the approve/cancel reactions to a tracked message so
-// members can vote with a single click instead of hunting for an emoji.
-func (r *Router) seedVoteReactions(channel, ts string) {
-	r.Slack.AddReaction("white_check_mark", slackItem(channel, ts))
-	r.Slack.AddReaction("x", slackItem(channel, ts))
+	store.LogEvent(&it.ID, "created", `{"via":"`+via+`"}`)
+	if w != nil {
+		w.Submit(IntakeJob{ItemID: it.ID})
+	}
+	return it, nil
 }
 
 func (r *Router) handleThreadReply(e MessageEvent) {
@@ -374,7 +398,7 @@ func (r *Router) HandleReactionAdded(e ReactionEvent) {
 	it, err := r.Store.GetItemByTS(e.Channel, e.TS)
 	if err != nil {
 		// could be a proposal reaction — handled in proposal-approval task
-		r.handleProposalReaction(e, /*add=*/ true)
+		r.handleProposalReaction(e /*add=*/, true)
 		return
 	}
 	if isTerminal(it.Status) {
@@ -499,24 +523,7 @@ func (r *Router) HandleAppMention(e MessageEvent) {
 		r.handleThreadReply(e)
 		return
 	}
-	// Top-level @mention in a non-watched channel — create item.
-	if _, err := r.Store.GetItemByTS(e.Channel, e.TS); err == nil {
-		return // already tracked
-	}
-	it := &Item{
-		SlackChannel:      e.Channel,
-		SlackTS:           e.TS,
-		AuthorSlackID:     e.User,
-		Text:              e.Text,
-		Status:            "collecting",
-		ApprovalThreshold: r.ApprovalThreshold,
-	}
-	if err := r.Store.InsertItem(it); err != nil {
-		return
-	}
-	r.seedVoteReactions(e.Channel, e.TS)
-	r.Store.LogEvent(&it.ID, "created", `{"via":"app_mention"}`)
-	if r.Worker != nil {
-		r.Worker.Submit(IntakeJob{ItemID: it.ID})
-	}
+	// Top-level @mention — an explicit ask to track, so it bypasses the proposal
+	// gate and is created directly.
+	materializeItem(r.Store, r.Slack, r.Worker, e, r.ApprovalThreshold, "app_mention")
 }

@@ -94,6 +94,20 @@ func (h *HealthServer) trigger(w http.ResponseWriter, r *http.Request) {
 				h.deps.Slack.AddReaction("wastebasket", slack.ItemRef{Channel: it.SlackChannel, Timestamp: it.SlackTS})
 			}
 		}
+	case "cancel":
+		it, err := h.deps.Store.GetItemByID(itemID)
+		if err != nil {
+			http.Error(w, "item not found", 404)
+			return
+		}
+		if !isTerminal(it.Status) {
+			h.deps.Store.UpdateItemStatus(it.ID, "cancelled")
+			h.deps.Store.LogEvent(&it.ID, "cancel", `{"via":"dashboard"}`)
+			// Best effort: react on original message; ignore Slack errors.
+			if h.deps.Slack != nil {
+				h.deps.Slack.AddReaction("wastebasket", slack.ItemRef{Channel: it.SlackChannel, Timestamp: it.SlackTS})
+			}
+		}
 	default:
 		http.Error(w, "bad action", 400)
 		return

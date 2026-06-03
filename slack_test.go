@@ -120,26 +120,67 @@ func TestFakeSlack_PostAndReact(t *testing.T) {
 	}
 }
 
-func TestRouter_NewItemInWatchedChannel(t *testing.T) {
+// seedItem inserts a collecting item directly, bypassing the proposal gate, so
+// tests that exercise downstream behaviour (votes, replies, commands) don't need
+// a worker + Claude judge in the loop. It deliberately does not seed reactions
+// or enqueue intake, keeping any wired worker queue clean for assertions.
+func seedItem(t *testing.T, r *Router, e MessageEvent) *Item {
+	t.Helper()
+	th := r.ApprovalThreshold
+	if th == 0 {
+		th = 3
+	}
+	it := &Item{
+		SlackChannel:      e.Channel,
+		SlackTS:           e.TS,
+		AuthorSlackID:     e.User,
+		Text:              e.Text,
+		Status:            "collecting",
+		ApprovalThreshold: th,
+	}
+	if err := r.Store.InsertItem(it); err != nil {
+		t.Fatalf("seed item: %v", err)
+	}
+	return it
+}
+
+func TestRouter_NewItemDefersToClassifyJob(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
+	w := &Worker{queue: make(chan job, 4)}
 	r := &Router{
 		Store: store, Slack: fake, BotUserID: "UBOT",
 		WatchedChannels:   map[string]bool{"C1": true},
-		ApprovalThreshold: 3,
+		ApprovalThreshold: 3, Worker: w,
 	}
 	r.HandleMessage(MessageEvent{
-		Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "park this for later",
+		Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "we should park this cleanup for later",
 	})
-	it, err := store.GetItemByTS("C1", "1700.1")
-	if err != nil {
-		t.Fatalf("item not stored: %v", err)
+	// The gate must not create the item up front — that waits on the judge.
+	if _, err := store.GetItemByTS("C1", "1700.1"); err != ErrNotFound {
+		t.Fatalf("expected no item before classification, got %v", err)
 	}
-	if it.Status != "collecting" {
-		t.Fatalf("status: %s", it.Status)
+	cj, ok := nextJobOfType[ClassifyJob](w)
+	if !ok {
+		t.Fatal("expected ClassifyJob enqueued")
 	}
-	if len(fake.reactions) != 2 || fake.reactions[0].Name != "white_check_mark" || fake.reactions[1].Name != "x" {
-		t.Fatalf("expected :white_check_mark: + :x: reactions, got %+v", fake.reactions)
+	if cj.TS != "1700.1" || cj.Text == "" || cj.ApprovalThreshold != 3 {
+		t.Fatalf("classify job missing fields: %+v", cj)
+	}
+}
+
+func TestRouter_ShortMessageIgnored(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	w := &Worker{queue: make(chan job, 4)}
+	r := &Router{
+		Store: store, Slack: fake, BotUserID: "UBOT",
+		WatchedChannels:   map[string]bool{"C1": true},
+		ApprovalThreshold: 3, Worker: w,
+	}
+	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "lol"})
+	if _, ok := nextJobOfType[ClassifyJob](w); ok {
+		t.Fatal("short chatter should not reach the classify judge")
 	}
 }
 
@@ -181,7 +222,7 @@ func TestRouter_ReactionAddedCountsAsVote(t *testing.T) {
 	fake := newFakeSlack("UBOT")
 	sig := &SignalsConfig{ApproveReactions: []string{"white_check_mark"}}
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
 	r.HandleReactionAdded(ReactionEvent{User: "U2", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	n, _ := store.CountVotes(it.ID)
@@ -195,7 +236,7 @@ func TestRouter_AuthorReactionExcluded(t *testing.T) {
 	fake := newFakeSlack("UBOT")
 	sig := &SignalsConfig{ApproveReactions: []string{"white_check_mark"}}
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
 	r.HandleReactionAdded(ReactionEvent{User: "U_AUTHOR", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	n, _ := store.CountVotes(it.ID)
@@ -209,7 +250,7 @@ func TestRouter_BotReactionExcluded(t *testing.T) {
 	fake := newFakeSlack("UBOT")
 	sig := &SignalsConfig{ApproveReactions: []string{"white_check_mark"}}
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
 	r.HandleReactionAdded(ReactionEvent{User: "UBOT", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	n, _ := store.CountVotes(it.ID)
@@ -223,7 +264,7 @@ func TestRouter_ReactionRemovedDecrements(t *testing.T) {
 	fake := newFakeSlack("UBOT")
 	sig := &SignalsConfig{ApproveReactions: []string{"white_check_mark"}}
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
 	r.HandleReactionAdded(ReactionEvent{User: "U2", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
 	r.HandleReactionRemoved(ReactionEvent{User: "U2", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
@@ -238,7 +279,7 @@ func TestRouter_CancelReactionMarksCancelled(t *testing.T) {
 	fake := newFakeSlack("UBOT")
 	sig := &SignalsConfig{CancelReactions: []string{"x"}}
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
 	r.HandleReactionAdded(ReactionEvent{User: "U2", Channel: "C1", TS: "1700.1", Name: "x"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	if it.Status != "cancelled" {
@@ -251,7 +292,7 @@ func TestRouter_ReplyApproveKeywordCountsVote(t *testing.T) {
 	fake := newFakeSlack("UBOT")
 	sig := &SignalsConfig{ApproveReplies: []string{"lgtm", "+1", "approve"}}
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "LGTM"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	n, _ := store.CountVotes(it.ID)
@@ -265,7 +306,7 @@ func TestRouter_ReplyCancelKeyword(t *testing.T) {
 	fake := newFakeSlack("UBOT")
 	sig := &SignalsConfig{CancelReplies: []string{"cancel"}}
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: sig, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> cancel"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	if it.Status != "cancelled" {
@@ -277,7 +318,7 @@ func TestRouter_BotMentionDispatch(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> status"})
 	// Bot should have posted at least one reply.
 	if len(fake.posted) < 1 {
@@ -299,7 +340,7 @@ func TestRouter_AppMentionInThreadDispatchesCommand(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
 	r.HandleAppMention(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> status"})
 	if len(fake.posted) == 0 {
 		t.Fatal("expected status reply")
@@ -310,7 +351,7 @@ func TestRouter_MessageDeletedCancels(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "x"})
 	r.HandleMessageDeleted(MessageEvent{Channel: "C1", TS: "1700.1"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	if it.Status != "cancelled" {
@@ -322,7 +363,7 @@ func TestRouter_MessageEditedUpdatesText(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "original"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U_AUTHOR", Text: "original"})
 	r.HandleMessageChanged(MessageEvent{Channel: "C1", TS: "1700.1", Text: "edited text", User: "U_AUTHOR"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	if it.Text != "edited text" {
@@ -334,7 +375,7 @@ func TestRouter_ResolutionNewKeyword(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	store.UpdateItemStatus(it.ID, "proposed")
 	p := &Proposal{ItemID: it.ID, SlackTS: "1700.2", DraftJSON: `{"summary":"s"}`, RelatedTicketsJSON: "[]", Branch: "awaiting_resolution", ExistingTicketKey: "QORK-5", Status: "awaiting_resolution"}
@@ -350,7 +391,7 @@ func TestCmdStatus_ReportsCounts(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{ApproveReactions: []string{"white_check_mark"}}, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	r.HandleReactionAdded(ReactionEvent{User: "U2", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U3", Text: "<@UBOT> status"})
 	if len(fake.posted) == 0 {
@@ -363,7 +404,7 @@ func TestCmdFileNow_TransitionsToProposing(t *testing.T) {
 	fake := newFakeSlack("UBOT")
 	w := &Worker{queue: make(chan job, 4)}
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3, Worker: w}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> file now"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	if it.Status != "proposing" {
@@ -378,7 +419,7 @@ func TestCmdProject_UpdatesSubproject(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> project: qatalyst"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	if it.Subproject != "qatalyst" {
@@ -390,7 +431,7 @@ func TestCmdPriority_SavedAsLatestOverride(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> priority: high"})
 	// Priority override stored via event log; verify it was logged.
 	events, _ := store.ListEventsForItem(1)
@@ -410,7 +451,7 @@ func TestCmdProject_TriggersRegenOnProposedItem(t *testing.T) {
 	fake := newFakeSlack("UBOT")
 	w := &Worker{queue: make(chan job, 4)}
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3, Worker: w}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	store.UpdateItemStatus(it.ID, "proposed")
 	store.InsertProposal(&Proposal{ItemID: it.ID, SlackTS: "1700.p", DraftJSON: "{}", RelatedTicketsJSON: "[]", Branch: "new", Status: "draft"})
@@ -432,7 +473,7 @@ func TestCmdPriority_TriggersRegenOnProposedItem(t *testing.T) {
 	fake := newFakeSlack("UBOT")
 	w := &Worker{queue: make(chan job, 4)}
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3, Worker: w}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	store.UpdateItemStatus(it.ID, "proposed")
 	store.InsertProposal(&Proposal{ItemID: it.ID, SlackTS: "1700.p", DraftJSON: "{}", RelatedTicketsJSON: "[]", Branch: "new", Status: "draft"})
@@ -454,7 +495,7 @@ func TestCmdRegen_EnqueuesProposeJob(t *testing.T) {
 	fake := newFakeSlack("UBOT")
 	w := &Worker{queue: make(chan job, 4)}
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3, Worker: w}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	store.UpdateItemStatus(it.ID, "proposed")
 	store.InsertProposal(&Proposal{ItemID: it.ID, SlackTS: "1700.x", DraftJSON: "{}", RelatedTicketsJSON: "[]", Branch: "new", Status: "draft"})
@@ -475,12 +516,12 @@ func TestCmdFreeform_AsksClaude(t *testing.T) {
 	fc := &fakeClaude{resp: "this item is about flaky tests."}
 	r := &Router{
 		Store: store, Slack: fake, BotUserID: "UBOT",
-		WatchedChannels: map[string]bool{"C1": true},
-		Signals:         &SignalsConfig{},
+		WatchedChannels:   map[string]bool{"C1": true},
+		Signals:           &SignalsConfig{},
 		ApprovalThreshold: 3,
-		Claude:          fc,
+		Claude:            fc,
 	}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "flaky test in qompass"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "flaky test in qompass"})
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> what's this about?"})
 	if len(fake.posted) == 0 {
 		t.Fatal("expected reply")
@@ -502,7 +543,7 @@ func TestRouter_ProposalReactionFilesViaWorker(t *testing.T) {
 		Worker:            w,
 	}
 	// Create an item.
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "do some work"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "do some work"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	store.UpdateItemStatus(it.ID, "proposed")
 
@@ -540,7 +581,7 @@ func TestCmdStatus_ShowsVotersAndNextReminder(t *testing.T) {
 		ReminderInterval:  3 * 24 * time.Hour,
 	}
 
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	r.HandleReactionAdded(ReactionEvent{User: "U2", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
 	r.HandleReactionAdded(ReactionEvent{User: "U3", Channel: "C1", TS: "1700.1", Name: "white_check_mark"})
 
@@ -568,7 +609,7 @@ func TestCmdStatus_NoVoters(t *testing.T) {
 		ApprovalThreshold: 3,
 		ReminderInterval:  3 * 24 * time.Hour,
 	}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: "<@UBOT> status"})
 	if len(fake.posted) == 0 {
 		t.Fatal("expected status reply")
@@ -589,7 +630,7 @@ func TestCmdStatus_NoNextReminderForNonCollecting(t *testing.T) {
 		ApprovalThreshold: 3,
 		ReminderInterval:  3 * 24 * time.Hour,
 	}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	store.UpdateItemStatus(it.ID, "proposed")
 
@@ -607,7 +648,7 @@ func TestRouter_ResolutionCommentKeyword(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
 	r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
-	r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+	seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 	it, _ := store.GetItemByTS("C1", "1700.1")
 	store.UpdateItemStatus(it.ID, "proposed")
 	p := &Proposal{ItemID: it.ID, SlackTS: "1700.2", DraftJSON: "{}", RelatedTicketsJSON: "[]", Branch: "awaiting_resolution", ExistingTicketKey: "QORK-5", Status: "awaiting_resolution"}

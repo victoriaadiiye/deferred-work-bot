@@ -53,8 +53,9 @@ func main() {
 
 	executor := &JobExecutor{
 		Store: store, Slack: api, Claude: claudeRunner,
-		Jira:      newMetricsJira(jira, appMetrics),
-		Projects:  projects, Signals: signals, BotUserID: botID,
+		Jira:     newMetricsJira(jira, appMetrics),
+		Projects: projects, Signals: signals, BotUserID: botID,
+		JiraBaseURL: cfg.JiraBaseURL,
 	}
 	worker := NewWorker(cfg.Workers, cfg.QueueSize, WorkerDeps{
 		Execute: func(ctx context.Context, j job) error {
@@ -65,6 +66,9 @@ func main() {
 		},
 		Logger: log.Printf,
 	})
+	// The executor enqueues follow-up jobs (e.g. IntakeJob after a ClassifyJob
+	// accepts a message), so it needs a handle to the worker it runs under.
+	executor.Worker = worker
 	worker.Start()
 
 	watched := map[string]bool{}
@@ -75,9 +79,10 @@ func main() {
 		Store: store, Slack: api, BotUserID: botID,
 		WatchedChannels: watched, ApprovalThreshold: cfg.ApprovalThreshold,
 		AuthorCanApprove: cfg.AuthorCanApprove,
-		Signals: signals, Projects: projects, Worker: worker, Config: cfg,
+		Signals:          signals, Projects: projects, Worker: worker, Config: cfg,
 		Claude:           claudeRunner,
 		ReminderInterval: time.Duration(cfg.ReminderIntervalDays) * 24 * time.Hour,
+		ProposalMinWords: cfg.ProposalMinWords,
 	}
 
 	tk := &Ticker{

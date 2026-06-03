@@ -408,23 +408,34 @@ func ensureLabels(labels []string, required ...string) []string {
 	return out
 }
 
+// jiraLink renders a Jira issue key as a Slack hyperlink to its browse URL.
+// Slack's <url|text> syntax needs a real URL in the first field; passing a bare
+// key there produces a broken, non-clickable link. When the base URL is unknown
+// it falls back to the plain key so the message stays readable.
+func jiraLink(base, key string) string {
+	if base == "" || key == "" {
+		return key
+	}
+	return fmt.Sprintf("<%s/browse/%s|%s>", base, key, key)
+}
+
 // RenderIntakeMessage builds the status comment posted right after an item is
 // created: it acknowledges the proposal, reports whether the work looks new or
 // overlaps an existing ticket, surfaces related tickets, and shows the vote
 // count against the approval threshold.
-func RenderIntakeMessage(rels []RelatedTicket, branch, existing, epicKey, epicSummary string, votes, threshold int) string {
+func RenderIntakeMessage(rels []RelatedTicket, branch, existing, epicKey, epicSummary string, votes, threshold int, jiraBase string) string {
 	var b strings.Builder
 	b.WriteString(":wave: *Picked up this proposal* — I'll file it to Jira once it clears the approval gate.\n\n")
 	if branch == "awaiting_resolution" && existing != "" {
-		fmt.Fprintf(&b, "This may already be covered by <%s|%s>. If it's approved I'll ask whether to comment on that ticket, file a fresh one, or both.\n", existing, existing)
+		fmt.Fprintf(&b, "This may already be covered by %s. If it's approved I'll ask whether to comment on that ticket, file a fresh one, or both.\n", jiraLink(jiraBase, existing))
 	} else {
 		b.WriteString("Looks *new* — I didn't find an existing ticket that already covers this.\n")
 	}
 	if epicKey != "" {
 		if epicSummary != "" {
-			fmt.Fprintf(&b, "*Epic:* %s — %s (reply `@bot epic: <KEY>` to change, `@bot epic: none` to skip).\n", epicKey, epicSummary)
+			fmt.Fprintf(&b, "*Epic:* %s — %s (reply `@bot epic: <KEY>` to change, `@bot epic: none` to skip).\n", jiraLink(jiraBase, epicKey), epicSummary)
 		} else {
-			fmt.Fprintf(&b, "*Epic:* %s (reply `@bot epic: <KEY>` to change, `@bot epic: none` to skip).\n", epicKey)
+			fmt.Fprintf(&b, "*Epic:* %s (reply `@bot epic: <KEY>` to change, `@bot epic: none` to skip).\n", jiraLink(jiraBase, epicKey))
 		}
 	} else {
 		b.WriteString("*Epic:* none found — reply `@bot epic: <KEY>` to set one.\n")
@@ -438,7 +449,7 @@ func RenderIntakeMessage(rels []RelatedTicket, branch, existing, epicKey, epicSu
 	if len(related) > 0 {
 		b.WriteString("\n*Possibly related:*\n")
 		for _, r := range related {
-			fmt.Fprintf(&b, "• <%s|%s>\n", r.Key, r.Key)
+			fmt.Fprintf(&b, "• %s\n", jiraLink(jiraBase, r.Key))
 		}
 	}
 	fmt.Fprintf(&b, "\n*%d/%d approvals.* React :white_check_mark: to approve or :x: to cancel.", votes, threshold)
@@ -446,13 +457,13 @@ func RenderIntakeMessage(rels []RelatedTicket, branch, existing, epicKey, epicSu
 }
 
 // RenderProposalMessage builds the Slack message body for a deferred-work proposal.
-func RenderProposalMessage(d *Draft, rels []RelatedTicket, branch, existingKey string, ttlTriggered bool) string {
+func RenderProposalMessage(d *Draft, rels []RelatedTicket, branch, existingKey string, ttlTriggered bool, jiraBase string) string {
 	var b strings.Builder
 	if ttlTriggered {
 		b.WriteString(":warning: *no response from team in 3 days — proposing anyway*\n\n")
 	}
 	if branch == "awaiting_resolution" {
-		fmt.Fprintf(&b, "*Existing ticket may cover this:* <%s|%s> (encompassed).\n\n", existingKey, existingKey)
+		fmt.Fprintf(&b, "*Existing ticket may cover this:* %s (encompassed).\n\n", jiraLink(jiraBase, existingKey))
 		b.WriteString("Reply `comment` to add a follow-up to the existing ticket, `new` to file a fresh one, or `both` for both.\n")
 		return b.String()
 	}
@@ -469,9 +480,9 @@ func RenderProposalMessage(d *Draft, rels []RelatedTicket, branch, existingKey s
 		fmt.Fprintf(&b, "*Labels:* %s\n", strings.Join(d.Labels, ", "))
 		if d.EpicKey != "" {
 			if d.EpicSummary != "" {
-				fmt.Fprintf(&b, "*Epic:* %s — %s\n", d.EpicKey, d.EpicSummary)
+				fmt.Fprintf(&b, "*Epic:* %s — %s\n", jiraLink(jiraBase, d.EpicKey), d.EpicSummary)
 			} else {
-				fmt.Fprintf(&b, "*Epic:* %s\n", d.EpicKey)
+				fmt.Fprintf(&b, "*Epic:* %s\n", jiraLink(jiraBase, d.EpicKey))
 			}
 		}
 	}
@@ -481,7 +492,7 @@ func RenderProposalMessage(d *Draft, rels []RelatedTicket, branch, existingKey s
 			if r.Verdict == "unrelated" {
 				continue
 			}
-			fmt.Fprintf(&b, "• <%s|%s> — %s\n", r.Key, r.Key, r.Verdict)
+			fmt.Fprintf(&b, "• %s — %s\n", jiraLink(jiraBase, r.Key), r.Verdict)
 		}
 	}
 	b.WriteString("\n_React with any approve signal to file. `@bot regen` to revise._")
@@ -567,9 +578,13 @@ type JobExecutor struct {
 	Slack     SlackAPI
 	Claude    claudeAPI
 	Jira      jiraAPI
-	Projects  *ProjectsConfig
-	Signals   *SignalsConfig
-	BotUserID string
+	Projects    *ProjectsConfig
+	Signals     *SignalsConfig
+	BotUserID   string
+	JiraBaseURL string
+	// Worker lets jobs enqueue follow-up jobs — e.g. a ClassifyJob that decides a
+	// message is a proposal queues the IntakeJob for the item it creates.
+	Worker *Worker
 }
 
 func (e *JobExecutor) Execute(ctx context.Context, j job) error {
@@ -582,8 +597,34 @@ func (e *JobExecutor) Execute(ctx context.Context, j job) error {
 		return e.executeReminder(ctx, v.ItemID)
 	case IntakeJob:
 		return e.executeIntake(ctx, v.ItemID)
+	case ClassifyJob:
+		return e.executeClassify(ctx, v)
 	}
 	return fmt.Errorf("unknown job: %s", j.kind())
+}
+
+// executeClassify runs the Claude proposal judge for a watched-channel message
+// that cleared the cheap heuristic prefilter. Only on a "yes" does it create the
+// tracked item (and seed vote reactions). It fails open: if the judge is
+// unconfigured or errors, the item is created anyway, so a model outage degrades
+// to "heuristic only" rather than silently dropping real work.
+func (e *JobExecutor) executeClassify(ctx context.Context, j ClassifyJob) error {
+	if _, err := e.Store.GetItemByTS(j.Channel, j.TS); err == nil {
+		return nil // already tracked (duplicate event)
+	}
+	isProposal := true
+	if e.Claude != nil {
+		if v, err := classifyIsProposal(ctx, e.Claude, j.Text); err == nil {
+			isProposal = v
+		}
+	}
+	if !isProposal {
+		return nil // chatter — ignore silently
+	}
+	_, err := materializeItem(e.Store, e.Slack, e.Worker, MessageEvent{
+		Channel: j.Channel, TS: j.TS, User: j.User, Text: j.Text,
+	}, j.ApprovalThreshold, "classified")
+	return err
 }
 
 // proposalContext holds the result of the "is this new?" analysis: the thread,
@@ -701,7 +742,7 @@ func (e *JobExecutor) executeIntake(ctx context.Context, itemID int64) error {
 	}
 	pc := e.gatherContext(ctx, it)
 	n, _ := e.Store.CountVotes(it.ID)
-	body := RenderIntakeMessage(pc.Rels, pc.Branch, pc.Existing, pc.EpicKey, pc.EpicSummary, n, it.ApprovalThreshold)
+	body := RenderIntakeMessage(pc.Rels, pc.Branch, pc.Existing, pc.EpicKey, pc.EpicSummary, n, it.ApprovalThreshold, e.JiraBaseURL)
 	e.Slack.PostMessage(it.SlackChannel,
 		slack.MsgOptionText(body, false),
 		slack.MsgOptionTS(it.SlackTS))
@@ -710,18 +751,28 @@ func (e *JobExecutor) executeIntake(ctx context.Context, itemID int64) error {
 }
 
 // resolveAssignee maps a Slack user to a Jira account ID via their email
-// address, returning "" when it cannot be resolved (unknown user, missing
-// email scope, or no matching Jira account).
-func (e *JobExecutor) resolveAssignee(slackUserID string) string {
+// address. The returned reason is empty on success; otherwise it explains why
+// no assignee could be resolved (unknown user, missing email scope, no matching
+// Jira account) so the miss is observable rather than silently swallowed.
+func (e *JobExecutor) resolveAssignee(slackUserID string) (accountID, reason string) {
 	if slackUserID == "" {
-		return ""
+		return "", "item has no author Slack ID"
 	}
 	u, err := e.Slack.GetUserInfo(slackUserID)
-	if err != nil || u == nil || u.Profile.Email == "" {
-		return ""
+	if err != nil {
+		return "", fmt.Sprintf("Slack users.info failed: %v", err)
 	}
-	id, _ := e.Jira.FindAccountID(u.Profile.Email)
-	return id
+	if u == nil || u.Profile.Email == "" {
+		return "", "Slack user has no email (bot token likely missing the users:read.email scope)"
+	}
+	id, err := e.Jira.FindAccountID(u.Profile.Email)
+	if err != nil {
+		return "", fmt.Sprintf("Jira user search failed for %s: %v", u.Profile.Email, err)
+	}
+	if id == "" {
+		return "", fmt.Sprintf("no Jira account matches %s", u.Profile.Email)
+	}
+	return id, ""
 }
 
 func (e *JobExecutor) executePropose(ctx context.Context, itemID int64) error {
@@ -758,7 +809,7 @@ func (e *JobExecutor) executePropose(ctx context.Context, itemID int64) error {
 	}
 
 	// 6. Post proposal.
-	body := RenderProposalMessage(draft, rels, branch, existing, false)
+	body := RenderProposalMessage(draft, rels, branch, existing, false, e.JiraBaseURL)
 	_, ts, err := e.Slack.PostMessage(it.SlackChannel,
 		slack.MsgOptionText(body, false),
 		slack.MsgOptionTS(it.SlackTS))
@@ -866,13 +917,17 @@ func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {
 	if len(e.Projects.QORKProjects) > 0 {
 		projectKey = e.Projects.QORKProjects[0]
 	}
+	assignee, assigneeMiss := e.resolveAssignee(it.AuthorSlackID)
+	if assigneeMiss != "" {
+		e.Store.LogEvent(&it.ID, "assignee_unresolved", `{"reason":`+strconv.Quote(assigneeMiss)+`}`)
+	}
 	res, err := FileProposal(e.Jira, FileInput{
 		Branch:            p.Branch,
 		ProjectKey:        projectKey,
 		ExistingTicketKey: p.ExistingTicketKey,
 		CommentText:       commentText,
 		Draft:             &draft,
-		AssigneeAccountID: e.resolveAssignee(it.AuthorSlackID),
+		AssigneeAccountID: assignee,
 	})
 	if err != nil {
 		e.Slack.PostMessage(it.SlackChannel,
@@ -925,6 +980,13 @@ func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {
 			msg += " + "
 		}
 		msg += "commented on " + res.CommentedOn
+	}
+	if res.NewKey != "" {
+		if assignee != "" {
+			msg += fmt.Sprintf(" — assigned to <@%s>", it.AuthorSlackID)
+		} else {
+			msg += fmt.Sprintf(" — :warning: couldn't auto-assign (%s)", assigneeMiss)
+		}
 	}
 	e.Slack.PostMessage(it.SlackChannel, slack.MsgOptionText(msg, false), slack.MsgOptionTS(it.SlackTS))
 	e.Slack.AddReaction("white_check_mark", slack.ItemRef{Channel: it.SlackChannel, Timestamp: it.SlackTS})

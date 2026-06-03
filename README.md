@@ -5,10 +5,13 @@ Slack bot that tracks deferred work, gates it behind a 3-approval vote, drafts J
 ## How it works
 
 1. Post a deferred-work item in the dedicated channel (or `@deferred-work-bot <text>` in any invited channel).
-2. The bot reacts `:eyes:` and tracks the item.
-3. Three unique-user approvals (reactions or reply keywords) trigger a proposal draft.
-4. The bot posts the draft + related Jira tickets back to the thread.
-5. One approval reaction on the proposal files the ticket (or comments on an existing one).
+2. The bot decides whether the message actually proposes trackable work: a cheap length/content prefilter (`PROPOSAL_MIN_WORDS`, default 4) drops obvious chatter, then Claude judges the rest. Only accepted messages are tracked — an `@mention` always bypasses the gate. (If Claude is unavailable the gate fails open, so real work is never silently dropped.)
+3. Once tracked, the bot seeds the approve/cancel vote reactions.
+4. Three unique-user approvals (reactions or reply keywords) trigger a proposal draft.
+5. The bot posts the draft + related Jira tickets back to the thread.
+6. One approval reaction on the proposal files the ticket (or comments on an existing one).
+
+The dashboard (`/` on the health port) lists every item and has a **Cancel** button per in-flight item; cancelling also drops a `:wastebasket:` on the original Slack message.
 
 ## Commands
 

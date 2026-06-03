@@ -98,6 +98,65 @@ func TestTrigger_ArchiveAction(t *testing.T) {
 	}
 }
 
+func TestTrigger_CancelAction(t *testing.T) {
+	srv, store, fake, _ := newTestHealthServer(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "cancel me", Status: "collecting", ApprovalThreshold: 3}
+	store.InsertItem(it)
+
+	req := httptest.NewRequest("POST", "/trigger?item_id=1&action=cancel", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, req)
+
+	if rec.Code != 202 {
+		t.Fatalf("code: %d, body: %s", rec.Code, rec.Body.String())
+	}
+	got, _ := store.GetItemByID(it.ID)
+	if got.Status != "cancelled" {
+		t.Fatalf("expected cancelled, got %s", got.Status)
+	}
+
+	hasWastebasket := false
+	for _, r := range fake.reactions {
+		if r.Name == "wastebasket" && r.Action == "add" {
+			hasWastebasket = true
+		}
+	}
+	if !hasWastebasket {
+		t.Fatal("expected :wastebasket: reaction on original message")
+	}
+
+	events, _ := store.ListEventsForItem(it.ID)
+	found := false
+	for _, ev := range events {
+		if ev.Kind == "cancel" && strings.Contains(ev.Payload, `"via":"dashboard"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected cancel event with via=dashboard")
+	}
+}
+
+func TestTrigger_CancelAction_SkipsAlreadyTerminal(t *testing.T) {
+	srv, store, _, _ := newTestHealthServer(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "ticketed", ApprovalThreshold: 3}
+	store.InsertItem(it)
+
+	req := httptest.NewRequest("POST", "/trigger?item_id=1&action=cancel", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, req)
+
+	if rec.Code != 202 {
+		t.Fatalf("code: %d", rec.Code)
+	}
+	got, _ := store.GetItemByID(it.ID)
+	if got.Status != "ticketed" {
+		t.Fatalf("terminal item should be untouched, got %s", got.Status)
+	}
+}
+
 func TestTrigger_ArchiveAction_SkipsAlreadyTerminal(t *testing.T) {
 	srv, store, _, _ := newTestHealthServer(t)
 	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "ticketed", ApprovalThreshold: 3}

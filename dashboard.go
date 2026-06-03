@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"html"
 	"net/http"
@@ -80,7 +81,7 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Fprint(w, `<table><thead><tr>`)
-	fmt.Fprint(w, `<th>Status</th><th>Text</th><th>Subproject</th><th>Jira</th><th>Epic</th><th>Age</th>`)
+	fmt.Fprint(w, `<th>Status</th><th>Text</th><th>Subproject</th><th>Jira</th><th>Epic</th><th>Age</th><th>Action</th>`)
 	fmt.Fprint(w, `</tr></thead><tbody>`)
 
 	for _, row := range visible {
@@ -117,7 +118,14 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 			subproject = "-"
 		}
 
-		fmt.Fprintf(w, `<tr><td><span class="badge %s">%s</span></td><td class="text-cell" title="%s">%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+		// Cancelling only makes sense while an item is still in flight; terminal
+		// items (ticketed/commented/cancelled/archived) show a dash.
+		actionCell := "-"
+		if !isTerminal(row.Status) {
+			actionCell = fmt.Sprintf(`<button class="cancel-btn" onclick="cancelItem(%d, this)">Cancel</button>`, row.ItemID)
+		}
+
+		fmt.Fprintf(w, `<tr><td><span class="badge %s">%s</span></td><td class="text-cell" title="%s">%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
 			statusClass,
 			html.EscapeString(row.Status),
 			html.EscapeString(row.Text),
@@ -126,6 +134,7 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 			jiraCell,
 			epicCell,
 			ageStr,
+			actionCell,
 		)
 	}
 
@@ -137,8 +146,32 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `<p class="empty">No deferred work items yet.</p>`)
 		}
 	}
+
+	// Inline the (optional) trigger token so the Cancel button can authenticate
+	// against POST /trigger. The dashboard is already an unauthenticated admin
+	// surface, so embedding it here does not widen exposure.
+	tok, _ := json.Marshal(h.deps.TriggerToken)
+	fmt.Fprintf(w, cancelScript, string(tok))
+
 	fmt.Fprint(w, pageFooter)
 }
+
+const cancelScript = `<script>
+var TRIGGER_TOKEN = %s;
+function cancelItem(id, btn) {
+  if (!confirm('Cancel item ' + id + '?')) return;
+  btn.disabled = true;
+  btn.textContent = '...';
+  var headers = {};
+  if (TRIGGER_TOKEN) headers['Authorization'] = 'Bearer ' + TRIGGER_TOKEN;
+  fetch('/trigger?item_id=' + id + '&action=cancel', {method: 'POST', headers: headers})
+    .then(function(res) {
+      if (res.ok) { location.reload(); }
+      else { btn.disabled = false; btn.textContent = 'Cancel'; alert('Cancel failed (' + res.status + ')'); }
+    })
+    .catch(function() { btn.disabled = false; btn.textContent = 'Cancel'; alert('Cancel failed'); });
+}
+</script>`
 
 // statusMatches reports whether a stored item status belongs to the given
 // dashboard status class (the short names used by the stat tiles).
@@ -238,6 +271,18 @@ const pageHead = `<!DOCTYPE html>
   .badge.cancelled { background: #8b949e22; color: #8b949e; }
   .badge.archived { background: #484f5822; color: #484f58; }
   .empty { text-align: center; color: #8b949e; padding: 3rem; }
+  .cancel-btn {
+    background: transparent;
+    border: 1px solid #f8514944;
+    color: #f85149;
+    border-radius: 6px;
+    padding: 3px 12px;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .cancel-btn:hover:not(:disabled) { background: #f8514922; border-color: #f85149; }
+  .cancel-btn:disabled { opacity: 0.5; cursor: default; }
   @media (max-width: 768px) {
     body { padding: 1rem; }
     .stats { gap: 0.5rem; }

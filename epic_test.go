@@ -85,7 +85,7 @@ func TestCmdEpic_Override(t *testing.T) {
 			store := newTestStore(t)
 			fake := newFakeSlack("UBOT")
 			r := &Router{Store: store, Slack: fake, BotUserID: "UBOT", WatchedChannels: map[string]bool{"C1": true}, Signals: &SignalsConfig{}, ApprovalThreshold: 3}
-			r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
+			seedItem(t, r, MessageEvent{Channel: "C1", TS: "1700.1", User: "U1", Text: "x"})
 			it, _ := store.GetItemByTS("C1", "1700.1")
 			r.HandleMessage(MessageEvent{Channel: "C1", TS: "1700.2", ThreadTS: "1700.1", User: "U2", Text: tc.input})
 			if got := latestEpicOverride(t, store, it.ID); got != tc.want {
