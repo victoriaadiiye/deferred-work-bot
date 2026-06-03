@@ -234,7 +234,7 @@ type SynthesizeInput struct {
 	Subproject     string
 	Permalink      string
 	Related        []RelatedTicket
-	EpicLocked     bool        // true when EpicKey is fixed by override/PR chain
+	EpicLocked     bool        // true when EpicKey is fixed by a human override
 	EpicKey        string      // pre-resolved epic (authoritative when EpicLocked)
 	EpicSummary    string      // summary of the pre-resolved epic, if known
 	EpicCandidates []JiraIssue // open epics to choose from when not locked
@@ -562,16 +562,11 @@ func DecideBranch(rels []RelatedTicket) (string, string) {
 	return "new", ""
 }
 
-type githubAPI interface {
-	FetchPR(ref PRRef) (*GitHubPR, error)
-}
-
 type JobExecutor struct {
 	Store     *Store
 	Slack     SlackAPI
 	Claude    claudeAPI
 	Jira      jiraAPI
-	GitHub    githubAPI
 	Projects  *ProjectsConfig
 	Signals   *SignalsConfig
 	BotUserID string
@@ -606,8 +601,7 @@ type proposalContext struct {
 
 // detectEpic resolves the parent epic for an item. Priority:
 //  1. Human override (`@bot epic: KEY` / `@bot epic: none`)
-//  2. PR → ticket → epic chain (if text mentions a GitHub PR)
-//  3. Claude classification against open epics
+//  2. Claude classification against open epics
 func (e *JobExecutor) detectEpic(ctx context.Context, it *Item) (key, summary string) {
 	if k, s, locked := e.resolvedEpicHard(it); locked {
 		return k, s
@@ -630,22 +624,18 @@ func (e *JobExecutor) detectEpic(ctx context.Context, it *Item) (key, summary st
 }
 
 // resolvedEpicHard returns the epic fixed by a deterministic source — a human
-// `@bot epic:` override or the PR→ticket→epic chain. locked is true whenever one
-// of those applies, including the explicit "none" override (which locks to no
-// epic). When locked, callers must not let the model pick a different epic.
+// `@bot epic:` override. locked is true whenever one applies, including the
+// explicit "none" override (which locks to no epic). When locked, callers must
+// not let the model pick a different epic.
 func (e *JobExecutor) resolvedEpicHard(it *Item) (key, summary string, locked bool) {
 	switch ov, _ := e.Store.LatestOverride(it.ID, "epic_override"); ov {
 	case "":
-		// fall through to the PR chain
+		return "", "", false
 	case "none":
 		return "", "", true
 	default:
 		return ov, "", true
 	}
-	if k, s := e.epicFromPR(it.Text); k != "" {
-		return k, s, true
-	}
-	return "", "", false
 }
 
 // loadThread returns the non-bot, non-original-message replies in an item's
@@ -660,33 +650,6 @@ func (e *JobExecutor) loadThread(it *Item) []string {
 		thread = append(thread, m.Text)
 	}
 	return thread
-}
-
-// epicFromPR extracts GitHub PR URLs from text, fetches each PR, finds Jira
-// keys mentioned in the PR title/body/branch, then looks up each ticket's
-// parent. Returns the first epic found.
-func (e *JobExecutor) epicFromPR(text string) (key, summary string) {
-	if e.GitHub == nil {
-		return "", ""
-	}
-	refs := ParsePRRefs(text)
-	for _, ref := range refs {
-		pr, err := e.GitHub.FetchPR(ref)
-		if err != nil {
-			continue
-		}
-		jiraKeys := ExtractJiraKeys(pr.Title, pr.Body, pr.Head.Ref)
-		for _, jk := range jiraKeys {
-			issue, err := e.Jira.GetIssue(jk)
-			if err != nil {
-				continue
-			}
-			if issue.Fields.Parent != nil && issue.Fields.Parent.Fields.IssueType.Name == "Epic" {
-				return issue.Fields.Parent.Key, issue.Fields.Parent.Fields.Summary
-			}
-		}
-	}
-	return "", ""
 }
 
 // gatherContext loads the thread, detects the sub-project, searches Jira, and
@@ -845,7 +808,7 @@ func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {
 
 	// For a fresh ticket, hand the whole context bundle to the agent: it writes
 	// the synthesized summary/description and picks the parent epic (unless one is
-	// already locked by a human override or the PR→epic chain). The same bundle is
+	// already locked by a human override). The same bundle is
 	// rendered to markdown and attached to the issue for full traceability.
 	var contextMD string
 	if p.Branch == "new" || p.Branch == "both" {
