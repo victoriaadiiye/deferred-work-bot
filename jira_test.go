@@ -11,7 +11,7 @@ import (
 
 func TestJira_Search(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/rest/api/3/search" {
+		if r.URL.Path != "/rest/api/3/search/jql" {
 			t.Errorf("path: %s", r.URL.Path)
 		}
 		if r.Method != "POST" {

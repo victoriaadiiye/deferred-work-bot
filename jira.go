@@ -94,7 +94,7 @@ func (c *JiraClient) searchJQL(jql string, limit int) ([]JiraIssue, error) {
 		"maxResults": limit,
 		"fields":     []string{"summary", "description", "labels", "status"},
 	})
-	req, _ := http.NewRequest("POST", c.BaseURL+"/rest/api/3/search", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", c.BaseURL+"/rest/api/3/search/jql", bytes.NewReader(body))
 	req.SetBasicAuth(c.Email, c.Token)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
