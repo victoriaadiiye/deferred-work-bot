@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strings"
@@ -253,6 +254,39 @@ func (c *JiraClient) AddLabel(issueKey, label string) error {
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("add label %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+// AddAttachment uploads a file to an issue. Jira requires the multipart field
+// name "file" and the X-Atlassian-Token: no-check header to bypass XSRF checks
+// on the attachments endpoint.
+func (c *JiraClient) AddAttachment(issueKey, filename string, content []byte) error {
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	part, err := w.CreateFormFile("file", filename)
+	if err != nil {
+		return err
+	}
+	if _, err := part.Write(content); err != nil {
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	req, _ := http.NewRequest("POST", c.BaseURL+"/rest/api/3/issue/"+issueKey+"/attachments", &buf)
+	req.SetBasicAuth(c.Email, c.Token)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("X-Atlassian-Token", "no-check")
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("add attachment %d: %s", resp.StatusCode, string(b))
 	}
 	return nil
 }

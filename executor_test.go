@@ -162,6 +162,7 @@ func TestJobExecutor_ReminderFlow_SkipsTerminal(t *testing.T) {
 func TestJobExecutor_FileFlow_CreatesIssueAndLocks(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")
+	fc := &fakeClaude{resp: `{"summary":"synth summary","description":"synth desc","epic":""}`}
 	jc := &fakeJira{}
 	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "proposed", ApprovalThreshold: 3}
 	store.InsertItem(it)
@@ -175,9 +176,9 @@ func TestJobExecutor_FileFlow_CreatesIssueAndLocks(t *testing.T) {
 	}
 	store.InsertProposal(p)
 	ex := &JobExecutor{
-		Store: store, Slack: fake, Jira: jc,
-		Projects: &ProjectsConfig{QORKProjects: []string{"QORK"}},
-		Signals:  &SignalsConfig{},
+		Store: store, Slack: fake, Claude: fc, Jira: jc,
+		Projects:  &ProjectsConfig{QORKProjects: []string{"QORK"}},
+		Signals:   &SignalsConfig{},
 		BotUserID: "UBOT",
 	}
 	if err := ex.Execute(context.Background(), FileJob{ProposalID: p.ID}); err != nil {
@@ -193,5 +194,20 @@ func TestJobExecutor_FileFlow_CreatesIssueAndLocks(t *testing.T) {
 	}
 	if tk.JiraKey != "QORK-100" {
 		t.Fatalf("key: %s", tk.JiraKey)
+	}
+	// The agent synthesized the filed ticket.
+	if jc.lastCreate.Summary != "synth summary" || jc.lastCreate.Description != "synth desc" {
+		t.Fatalf("issue not built from synthesis: %+v", jc.lastCreate)
+	}
+	// The full context was attached as markdown to the new ticket.
+	if len(jc.attachments) != 1 {
+		t.Fatalf("expected 1 attachment, got %d", len(jc.attachments))
+	}
+	att := jc.attachments[0]
+	if att.Key != "QORK-100" || att.Filename != "QORK-100-context.md" {
+		t.Fatalf("attachment target/name: %+v", att)
+	}
+	if !strings.Contains(att.Content, "# Deferred-work context") || !strings.Contains(att.Content, "## Original message") {
+		t.Fatalf("attachment missing context: %s", att.Content)
 	}
 }

@@ -152,3 +152,36 @@ func TestJira_AddLabel(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestJira_AddAttachment(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/api/3/issue/QORK-100/attachments" || r.Method != "POST" {
+			t.Fatalf("unexpected: %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("X-Atlassian-Token") != "no-check" {
+			t.Errorf("missing XSRF bypass header")
+		}
+		if !strings.HasPrefix(r.Header.Get("Content-Type"), "multipart/form-data") {
+			t.Errorf("content-type: %s", r.Header.Get("Content-Type"))
+		}
+		f, hdr, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("no file part: %v", err)
+		}
+		defer f.Close()
+		if hdr.Filename != "QORK-100-context.md" {
+			t.Errorf("filename: %s", hdr.Filename)
+		}
+		b, _ := io.ReadAll(f)
+		if !strings.Contains(string(b), "# Deferred-work context") {
+			t.Errorf("content: %s", string(b))
+		}
+		w.WriteHeader(200)
+		w.Write([]byte(`[{"id":"10001"}]`))
+	}))
+	defer srv.Close()
+	c := &JiraClient{BaseURL: srv.URL, Email: "u", Token: "t", HTTP: http.DefaultClient}
+	if err := c.AddAttachment("QORK-100", "QORK-100-context.md", []byte("# Deferred-work context\n\nbody")); err != nil {
+		t.Fatal(err)
+	}
+}

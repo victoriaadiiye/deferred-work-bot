@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -226,6 +227,164 @@ Only return the JSON, no other text.`,
 	return &d, nil
 }
 
+// SynthesizeInput is the full context bundle handed to the file-time agent.
+type SynthesizeInput struct {
+	Text           string
+	Thread         []string
+	Subproject     string
+	Permalink      string
+	Related        []RelatedTicket
+	EpicLocked     bool        // true when EpicKey is fixed by override/PR chain
+	EpicKey        string      // pre-resolved epic (authoritative when EpicLocked)
+	EpicSummary    string      // summary of the pre-resolved epic, if known
+	EpicCandidates []JiraIssue // open epics to choose from when not locked
+}
+
+// Synthesized is the agent's structured response: a concise ticket plus its
+// chosen epic. The epic is validated against the candidate keys by the caller
+// so a hallucinated key can never reach Jira.
+type Synthesized struct {
+	Summary     string `json:"summary"`
+	Description string `json:"description"`
+	Epic        string `json:"epic"`
+}
+
+// SynthesizeTicket hands the whole context bundle to the agent in one call. The
+// agent writes a short, synthesized description and either references the epic
+// that is already locked or picks the best-fitting one from the candidates.
+func SynthesizeTicket(ctx context.Context, c claudeAPI, in SynthesizeInput) (*Synthesized, error) {
+	var epicSection string
+	switch {
+	case in.EpicLocked && in.EpicKey != "":
+		epicSection = fmt.Sprintf("The parent epic is already decided: %s%s. Reference it in the description and return this exact key in \"epic\"; do not choose a different one.", in.EpicKey, epicParen(in.EpicSummary))
+	case in.EpicLocked:
+		epicSection = `No parent epic applies to this work. Return "" for "epic".`
+	case len(in.EpicCandidates) > 0:
+		list := make([]map[string]any, len(in.EpicCandidates))
+		for i, ep := range in.EpicCandidates {
+			list[i] = map[string]any{"key": ep.Key, "summary": ep.Fields.Summary}
+		}
+		payload, _ := json.Marshal(list)
+		epicSection = fmt.Sprintf("Pick the parent epic this work best belongs to from these candidates, or \"\" if none is a clear fit:\n%s", string(payload))
+	default:
+		epicSection = `No epic candidates are available. Return "" for "epic".`
+	}
+
+	relPayload := "none"
+	if len(in.Related) > 0 {
+		b, _ := json.Marshal(in.Related)
+		relPayload = string(b)
+	}
+
+	prompt := fmt.Sprintf(`You are writing a Jira ticket from a Slack deferred-work item. Synthesize all of the context below into one concise, well-scoped ticket.
+
+ORIGINAL MESSAGE:
+%s
+
+THREAD COMMENTS:
+%s
+
+SUB-PROJECT: %q
+RELATED TICKETS: %s
+SLACK PERMALINK: %s
+
+EPIC:
+%s
+
+Return JSON only:
+{
+  "summary": "<one-line, imperative voice, <=120 chars>",
+  "description": "<a short synthesized description — a few tight paragraphs that capture the problem and the intended work, NOT a transcript of the thread. If an epic is chosen, mention it. Finish with a line linking the Slack permalink.>",
+  "epic": "<the chosen epic key, or an empty string>"
+}
+Only return the JSON, no other text.`,
+		in.Text,
+		strings.Join(in.Thread, "\n---\n"),
+		in.Subproject,
+		relPayload,
+		in.Permalink,
+		epicSection,
+	)
+	out, err := c.Run(ctx, prompt)
+	if err != nil {
+		return nil, err
+	}
+	js, err := ExtractJSON(out)
+	if err != nil {
+		return nil, err
+	}
+	var s Synthesized
+	if err := json.Unmarshal([]byte(js), &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// validateEpicChoice returns the candidate matching key (with its summary), or
+// ("", "") when key is empty or not among the candidates.
+func validateEpicChoice(key string, candidates []JiraIssue) (string, string) {
+	if key == "" {
+		return "", ""
+	}
+	for _, ep := range candidates {
+		if ep.Key == key {
+			return ep.Key, ep.Fields.Summary
+		}
+	}
+	return "", ""
+}
+
+func epicParen(summary string) string {
+	if summary == "" {
+		return ""
+	}
+	return " (" + summary + ")"
+}
+
+// buildContextMarkdown renders the full context bundle handed to the agent as a
+// markdown document, attached to the ticket so the synthesized description is
+// always backed by the complete, verbatim source material.
+func buildContextMarkdown(it *Item, thread []string, rels []RelatedTicket, epicKey, epicSummary, permalink string) string {
+	var b strings.Builder
+	b.WriteString("# Deferred-work context\n\n")
+	fmt.Fprintf(&b, "- Slack channel: %s\n", it.SlackChannel)
+	fmt.Fprintf(&b, "- Slack thread ts: %s\n", it.SlackTS)
+	if it.Subproject != "" {
+		fmt.Fprintf(&b, "- Sub-project: %s\n", it.Subproject)
+	}
+	if permalink != "" {
+		fmt.Fprintf(&b, "- Permalink: %s\n", permalink)
+	}
+	if epicKey != "" {
+		if epicSummary != "" {
+			fmt.Fprintf(&b, "- Epic: %s — %s\n", epicKey, epicSummary)
+		} else {
+			fmt.Fprintf(&b, "- Epic: %s\n", epicKey)
+		}
+	}
+	b.WriteString("\n## Original message\n\n")
+	b.WriteString(it.Text)
+	b.WriteString("\n\n## Thread discussion\n\n")
+	if len(thread) == 0 {
+		b.WriteString("_(no replies)_\n")
+	} else {
+		for _, c := range thread {
+			fmt.Fprintf(&b, "- %s\n", strings.ReplaceAll(c, "\n", " "))
+		}
+	}
+	if len(rels) > 0 {
+		b.WriteString("\n## Related tickets\n\n")
+		for _, r := range rels {
+			fmt.Fprintf(&b, "- %s — %s", r.Key, r.Verdict)
+			if r.Summary != "" {
+				fmt.Fprintf(&b, " — %s", r.Summary)
+			}
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
 func labelHint(sub string) string {
 	if sub == "" {
 		return ""
@@ -336,6 +495,7 @@ type jiraAPI interface {
 	CreateIssue(in CreateIssueInput) (*CreatedIssue, error)
 	AddComment(key, text string) error
 	AddLabel(key, label string) error
+	AddAttachment(key, filename string, content []byte) error
 	FindAccountID(email string) (string, error)
 }
 
@@ -449,16 +609,7 @@ type proposalContext struct {
 //  2. PR → ticket → epic chain (if text mentions a GitHub PR)
 //  3. Claude classification against open epics
 func (e *JobExecutor) detectEpic(ctx context.Context, it *Item) (key, summary string) {
-	switch ov, _ := e.Store.LatestOverride(it.ID, "epic_override"); ov {
-	case "":
-		// fall through
-	case "none":
-		return "", ""
-	default:
-		return ov, ""
-	}
-
-	if k, s := e.epicFromPR(it.Text); k != "" {
+	if k, s, locked := e.resolvedEpicHard(it); locked {
 		return k, s
 	}
 
@@ -476,6 +627,39 @@ func (e *JobExecutor) detectEpic(ctx context.Context, it *Item) (key, summary st
 		}
 	}
 	return k, ""
+}
+
+// resolvedEpicHard returns the epic fixed by a deterministic source — a human
+// `@bot epic:` override or the PR→ticket→epic chain. locked is true whenever one
+// of those applies, including the explicit "none" override (which locks to no
+// epic). When locked, callers must not let the model pick a different epic.
+func (e *JobExecutor) resolvedEpicHard(it *Item) (key, summary string, locked bool) {
+	switch ov, _ := e.Store.LatestOverride(it.ID, "epic_override"); ov {
+	case "":
+		// fall through to the PR chain
+	case "none":
+		return "", "", true
+	default:
+		return ov, "", true
+	}
+	if k, s := e.epicFromPR(it.Text); k != "" {
+		return k, s, true
+	}
+	return "", "", false
+}
+
+// loadThread returns the non-bot, non-original-message replies in an item's
+// Slack thread.
+func (e *JobExecutor) loadThread(it *Item) []string {
+	msgs, _, _, _ := e.Slack.GetConversationReplies(&slack.GetConversationRepliesParameters{ChannelID: it.SlackChannel, Timestamp: it.SlackTS})
+	var thread []string
+	for _, m := range msgs {
+		if m.User == e.BotUserID || m.Timestamp == it.SlackTS {
+			continue
+		}
+		thread = append(thread, m.Text)
+	}
+	return thread
 }
 
 // epicFromPR extracts GitHub PR URLs from text, fetches each PR, finds Jira
@@ -509,14 +693,7 @@ func (e *JobExecutor) epicFromPR(text string) (key, summary string) {
 // classifies related tickets. It persists a freshly-detected sub-project so
 // later runs reuse it.
 func (e *JobExecutor) gatherContext(ctx context.Context, it *Item) proposalContext {
-	msgs, _, _, _ := e.Slack.GetConversationReplies(&slack.GetConversationRepliesParameters{ChannelID: it.SlackChannel, Timestamp: it.SlackTS})
-	var thread []string
-	for _, m := range msgs {
-		if m.User == e.BotUserID || m.Timestamp == it.SlackTS {
-			continue
-		}
-		thread = append(thread, m.Text)
-	}
+	thread := e.loadThread(it)
 
 	sub := it.Subproject
 	if sub == "" {
@@ -663,35 +840,61 @@ func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {
 	var draft Draft
 	json.Unmarshal([]byte(p.DraftJSON), &draft)
 
-	// When the item was originally awaiting_resolution and resolved to new/both,
-	// the proposal was created without a draft. Re-draft now before filing.
-	if (p.Branch == "new" || p.Branch == "both") && draft.Summary == "" {
-		msgs, _, _, _ := e.Slack.GetConversationReplies(&slack.GetConversationRepliesParameters{ChannelID: it.SlackChannel, Timestamp: it.SlackTS})
-		var thread []string
-		for _, m := range msgs {
-			if m.User == e.BotUserID || m.Timestamp == it.SlackTS {
-				continue
-			}
-			thread = append(thread, m.Text)
-		}
+	var rels []RelatedTicket
+	json.Unmarshal([]byte(p.RelatedTicketsJSON), &rels)
+
+	// For a fresh ticket, hand the whole context bundle to the agent: it writes
+	// the synthesized summary/description and picks the parent epic (unless one is
+	// already locked by a human override or the PR→epic chain). The same bundle is
+	// rendered to markdown and attached to the issue for full traceability.
+	var contextMD string
+	if p.Branch == "new" || p.Branch == "both" {
+		thread := e.loadThread(it)
 		permalink, _ := e.Slack.GetPermalink(&slack.PermalinkParameters{Channel: it.SlackChannel, Ts: it.SlackTS})
 		priority, _ := e.Store.LatestOverride(it.ID, "priority_override")
-		d, err := DraftTicket(ctx, e.Claude, DraftInput{
-			Text:         it.Text,
-			Thread:       thread,
-			Subproject:   it.Subproject,
-			PriorityOver: priority,
-			Permalink:    permalink,
+		if priority == "" {
+			priority = draft.Priority
+		}
+		if priority == "" {
+			priority = "Medium"
+		}
+
+		epicKey, epicSummary, locked := e.resolvedEpicHard(it)
+		var candidates []JiraIssue
+		if !locked {
+			candidates, _ = e.Jira.SearchEpics(e.Projects.QORKProjects, 50)
+		}
+
+		syn, err := SynthesizeTicket(ctx, e.Claude, SynthesizeInput{
+			Text:           it.Text,
+			Thread:         thread,
+			Subproject:     it.Subproject,
+			Permalink:      permalink,
+			Related:        rels,
+			EpicLocked:     locked,
+			EpicKey:        epicKey,
+			EpicSummary:    epicSummary,
+			EpicCandidates: candidates,
 		})
 		if err != nil {
+			e.Slack.PostMessage(it.SlackChannel,
+				slack.MsgOptionText(":warning: Failed to draft ticket: "+err.Error(), false),
+				slack.MsgOptionTS(it.SlackTS))
 			return err
 		}
-		draft = *d
-	}
-	// Ensure a parent epic is resolved — covers the re-draft path above, where
-	// the original proposal was filed without one.
-	if draft.EpicKey == "" {
-		draft.EpicKey, draft.EpicSummary = e.detectEpic(ctx, it)
+		if !locked {
+			epicKey, epicSummary = validateEpicChoice(syn.Epic, candidates)
+		}
+
+		draft.Summary = syn.Summary
+		draft.Description = syn.Description
+		draft.IssueType = "Task"
+		draft.Priority = priority
+		draft.Labels = ensureLabels(draft.Labels, "deferred-work", it.Subproject)
+		draft.EpicKey = epicKey
+		draft.EpicSummary = epicSummary
+
+		contextMD = buildContextMarkdown(it, thread, rels, epicKey, epicSummary, permalink)
 	}
 
 	commentText := buildExistingTicketComment(it.Text, draft.Description)
@@ -731,6 +934,15 @@ func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {
 		Action:            action,
 		ExistingTicketKey: p.ExistingTicketKey,
 	})
+
+	// Attach the full context as markdown. The ticket already exists, so a failed
+	// upload is logged but never fails the filing.
+	if res.NewKey != "" && contextMD != "" {
+		filename := res.NewKey + "-context.md"
+		if aerr := e.Jira.AddAttachment(res.NewKey, filename, []byte(contextMD)); aerr != nil {
+			e.Store.LogEvent(&it.ID, "attachment_failed", `{"key":"`+res.NewKey+`","error":`+strconv.Quote(aerr.Error())+`}`)
+		}
+	}
 
 	switch p.Branch {
 	case "new":

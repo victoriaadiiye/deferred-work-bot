@@ -66,6 +66,14 @@ func (mj *metricsJira) AddLabel(key, label string) error {
 	return err
 }
 
+func (mj *metricsJira) AddAttachment(key, filename string, content []byte) error {
+	err := mj.inner.AddAttachment(key, filename, content)
+	if err != nil {
+		mj.metrics.IncJiraError()
+	}
+	return err
+}
+
 func (mj *metricsJira) FindAccountID(email string) (string, error) {
 	id, err := mj.inner.FindAccountID(email)
 	if err != nil {

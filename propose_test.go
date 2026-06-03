@@ -121,6 +121,69 @@ func TestDraftTicket_PriorityOverride(t *testing.T) {
 	}
 }
 
+func TestSynthesizeTicket_PicksFromCandidates(t *testing.T) {
+	fc := &fakeClaude{resp: `{"summary":"Fix ingest retry","description":"short synthesized desc","epic":"QORK-7"}`}
+	cands := []JiraIssue{{Key: "QORK-7"}}
+	cands[0].Fields.Summary = "Ingest reliability"
+	syn, err := SynthesizeTicket(context.Background(), fc, SynthesizeInput{
+		Text:           "ingest retries are flaky",
+		Thread:         []string{"agreed"},
+		Related:        []RelatedTicket{{Key: "QORK-3", Verdict: "referenced"}},
+		EpicCandidates: cands,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if syn.Summary != "Fix ingest retry" || syn.Epic != "QORK-7" {
+		t.Fatalf("parsed: %+v", syn)
+	}
+	// The prompt must offer the candidate epics and the related tickets.
+	if len(fc.got) != 1 || !strings.Contains(fc.got[0], "QORK-7") || !strings.Contains(fc.got[0], "QORK-3") {
+		t.Fatalf("prompt missing context: %v", fc.got)
+	}
+}
+
+func TestSynthesizeTicket_LockedEpic(t *testing.T) {
+	fc := &fakeClaude{resp: `{"summary":"s","description":"d","epic":"QORK-9"}`}
+	_, err := SynthesizeTicket(context.Background(), fc, SynthesizeInput{
+		Text:       "work",
+		EpicLocked: true,
+		EpicKey:    "QORK-9",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fc.got[0], "already decided: QORK-9") {
+		t.Fatalf("prompt should pin the locked epic: %s", fc.got[0])
+	}
+}
+
+func TestValidateEpicChoice(t *testing.T) {
+	cands := []JiraIssue{{Key: "QORK-7"}, {Key: "QORK-8"}}
+	cands[0].Fields.Summary = "Reliability"
+	if k, s := validateEpicChoice("QORK-7", cands); k != "QORK-7" || s != "Reliability" {
+		t.Fatalf("valid choice: %s %s", k, s)
+	}
+	if k, _ := validateEpicChoice("QORK-999", cands); k != "" {
+		t.Fatalf("hallucinated key should be rejected, got %s", k)
+	}
+	if k, _ := validateEpicChoice("", cands); k != "" {
+		t.Fatalf("empty key should stay empty, got %s", k)
+	}
+}
+
+func TestBuildContextMarkdown(t *testing.T) {
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", Subproject: "qompass", Text: "the original message"}
+	md := buildContextMarkdown(it, []string{"reply one", "reply two"},
+		[]RelatedTicket{{Key: "QORK-3", Verdict: "referenced", Summary: "near thing"}},
+		"QORK-7", "Reliability", "https://slack/x")
+	for _, want := range []string{"the original message", "reply one", "reply two", "QORK-3", "QORK-7", "Reliability", "https://slack/x", "qompass"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("markdown missing %q:\n%s", want, md)
+		}
+	}
+}
+
 func TestRenderProposalMessage_NewBranch(t *testing.T) {
 	d := &Draft{
 		Summary:     "Fix flaky test",
@@ -163,9 +226,10 @@ type fakeJira struct {
 	labels     []struct{ Key, Label string }
 	failSearch bool
 	accountID  string
-	epics      []JiraIssue
-	issues     map[string]*JiraIssueDetail
-	lastCreate CreateIssueInput
+	epics       []JiraIssue
+	issues      map[string]*JiraIssueDetail
+	lastCreate  CreateIssueInput
+	attachments []struct{ Key, Filename, Content string }
 }
 
 func (f *fakeJira) Search(in JiraSearchInput) ([]JiraIssue, error) {
@@ -197,6 +261,10 @@ func (f *fakeJira) AddComment(key, text string) error {
 }
 func (f *fakeJira) AddLabel(key, label string) error {
 	f.labels = append(f.labels, struct{ Key, Label string }{key, label})
+	return nil
+}
+func (f *fakeJira) AddAttachment(key, filename string, content []byte) error {
+	f.attachments = append(f.attachments, struct{ Key, Filename, Content string }{key, filename, string(content)})
 	return nil
 }
 func (f *fakeJira) FindAccountID(email string) (string, error) {
