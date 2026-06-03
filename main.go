@@ -54,6 +54,7 @@ func main() {
 	executor := &JobExecutor{
 		Store: store, Slack: api, Claude: claudeRunner,
 		Jira:      newMetricsJira(jira, appMetrics),
+		GitHub:    NewGitHubClient(),
 		Projects:  projects, Signals: signals, BotUserID: botID,
 	}
 	worker := NewWorker(cfg.Workers, cfg.QueueSize, WorkerDeps{

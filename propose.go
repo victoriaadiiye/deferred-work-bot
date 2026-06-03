@@ -332,6 +332,7 @@ func RenderProposalMessage(d *Draft, rels []RelatedTicket, branch, existingKey s
 type jiraAPI interface {
 	Search(in JiraSearchInput) ([]JiraIssue, error)
 	SearchEpics(projects []string, limit int) ([]JiraIssue, error)
+	GetIssue(key string) (*JiraIssueDetail, error)
 	CreateIssue(in CreateIssueInput) (*CreatedIssue, error)
 	AddComment(key, text string) error
 	AddLabel(key, label string) error
@@ -401,11 +402,16 @@ func DecideBranch(rels []RelatedTicket) (string, string) {
 	return "new", ""
 }
 
+type githubAPI interface {
+	FetchPR(ref PRRef) (*GitHubPR, error)
+}
+
 type JobExecutor struct {
 	Store     *Store
 	Slack     SlackAPI
 	Claude    claudeAPI
 	Jira      jiraAPI
+	GitHub    githubAPI
 	Projects  *ProjectsConfig
 	Signals   *SignalsConfig
 	BotUserID string
@@ -438,19 +444,24 @@ type proposalContext struct {
 	EpicSummary string
 }
 
-// detectEpic resolves the parent epic for an item. A human override
-// (`@bot epic: KEY`, or `@bot epic: none` to force no epic) wins; otherwise it
-// classifies the work against the project's open epics. Returns ("", "") when
-// no epic applies.
+// detectEpic resolves the parent epic for an item. Priority:
+//  1. Human override (`@bot epic: KEY` / `@bot epic: none`)
+//  2. PR → ticket → epic chain (if text mentions a GitHub PR)
+//  3. Claude classification against open epics
 func (e *JobExecutor) detectEpic(ctx context.Context, it *Item) (key, summary string) {
 	switch ov, _ := e.Store.LatestOverride(it.ID, "epic_override"); ov {
 	case "":
-		// fall through to classification
+		// fall through
 	case "none":
 		return "", ""
 	default:
 		return ov, ""
 	}
+
+	if k, s := e.epicFromPR(it.Text); k != "" {
+		return k, s
+	}
+
 	epics, err := e.Jira.SearchEpics(e.Projects.QORKProjects, 50)
 	if err != nil || len(epics) == 0 {
 		return "", ""
@@ -465,6 +476,33 @@ func (e *JobExecutor) detectEpic(ctx context.Context, it *Item) (key, summary st
 		}
 	}
 	return k, ""
+}
+
+// epicFromPR extracts GitHub PR URLs from text, fetches each PR, finds Jira
+// keys mentioned in the PR title/body/branch, then looks up each ticket's
+// parent. Returns the first epic found.
+func (e *JobExecutor) epicFromPR(text string) (key, summary string) {
+	if e.GitHub == nil {
+		return "", ""
+	}
+	refs := ParsePRRefs(text)
+	for _, ref := range refs {
+		pr, err := e.GitHub.FetchPR(ref)
+		if err != nil {
+			continue
+		}
+		jiraKeys := ExtractJiraKeys(pr.Title, pr.Body, pr.Head.Ref)
+		for _, jk := range jiraKeys {
+			issue, err := e.Jira.GetIssue(jk)
+			if err != nil {
+				continue
+			}
+			if issue.Fields.Parent != nil && issue.Fields.Parent.Fields.IssueType.Name == "Epic" {
+				return issue.Fields.Parent.Key, issue.Fields.Parent.Fields.Summary
+			}
+		}
+	}
+	return "", ""
 }
 
 // gatherContext loads the thread, detects the sub-project, searches Jira, and
@@ -495,6 +533,11 @@ func (e *JobExecutor) gatherContext(ctx context.Context, it *Item) proposalConte
 		Keywords:   extractKeywords(it.Text),
 		Limit:      20,
 	})
+
+	// Include tickets the bot previously created so we catch our own duplicates
+	// even if the keyword search misses them.
+	botKeys, _ := e.Store.ListRecentTicketKeys(time.Now().Add(-90 * 24 * time.Hour))
+	issues = mergeIssues(issues, e.lookupMissing(issues, botKeys))
 
 	rels, _ := classifyRelatedTickets(ctx, e.Claude, it.Text, issues)
 	branch, existing := DecideBranch(rels)
@@ -743,6 +786,36 @@ func (e *JobExecutor) executeReminder(ctx context.Context, itemID int64) error {
 
 func buildExistingTicketComment(original, descPreview string) string {
 	return "*Deferred-work follow-up*\n\nOriginal Slack message:\n" + original + "\n\nSynthesized context:\n" + descPreview
+}
+
+// lookupMissing fetches Jira issues for keys not already present in the
+// existing set. Used to pull in bot-created tickets for dedup.
+func (e *JobExecutor) lookupMissing(existing []JiraIssue, keys []string) []JiraIssue {
+	have := map[string]bool{}
+	for _, iss := range existing {
+		have[iss.Key] = true
+	}
+	var out []JiraIssue
+	for _, k := range keys {
+		if have[k] {
+			continue
+		}
+		detail, err := e.Jira.GetIssue(k)
+		if err != nil {
+			continue
+		}
+		var iss JiraIssue
+		iss.Key = detail.Key
+		iss.Fields.Summary = detail.Fields.Summary
+		out = append(out, iss)
+	}
+	return out
+}
+
+func mergeIssues(a, b []JiraIssue) []JiraIssue {
+	out := make([]JiraIssue, len(a))
+	copy(out, a)
+	return append(out, b...)
 }
 
 // extractKeywords is a tiny stopword filter; the worker uses claude inference for tougher cases.

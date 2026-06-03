@@ -185,6 +185,30 @@ func TestStore_RecordTicket(t *testing.T) {
 	}
 }
 
+func TestStore_ListRecentTicketKeys(t *testing.T) {
+	s := newTestStore(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "x", Status: "proposed", ApprovalThreshold: 3}
+	s.InsertItem(it)
+	p := &Proposal{ItemID: it.ID, SlackTS: "2", DraftJSON: "{}", RelatedTicketsJSON: "[]", Branch: "new", Status: "filed"}
+	s.InsertProposal(p)
+	s.InsertTicket(&Ticket{ProposalID: p.ID, JiraKey: "QORK-50", JiraURL: "u", Action: "created"})
+	s.InsertTicket(&Ticket{ProposalID: p.ID, JiraKey: "QORK-51", JiraURL: "u", Action: "created"})
+
+	keys, err := s.ListRecentTicketKeys(time.Now().Add(-1 * time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 2 {
+		t.Fatalf("expected 2 keys, got %v", keys)
+	}
+
+	// Future cutoff returns nothing.
+	keys, _ = s.ListRecentTicketKeys(time.Now().Add(1 * time.Hour))
+	if len(keys) != 0 {
+		t.Fatalf("expected 0 keys with future cutoff, got %v", keys)
+	}
+}
+
 func TestStore_LogEvent(t *testing.T) {
 	s := newTestStore(t)
 	it := &Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "x", Status: "collecting", ApprovalThreshold: 3}

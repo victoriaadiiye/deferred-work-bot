@@ -417,3 +417,72 @@ func (s *Store) LatestOverride(itemID int64, kind string) (string, error) {
 	_ = json.Unmarshal([]byte(p), &parsed)
 	return parsed.Value, nil
 }
+
+type DashboardRow struct {
+	ItemID      int64
+	Text        string
+	Subproject  string
+	Status      string
+	AuthorSlack string
+	JiraKey     string
+	JiraURL     string
+	EpicKey     string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+func (s *Store) ListDashboardRows(limit int) ([]DashboardRow, error) {
+	if limit == 0 {
+		limit = 200
+	}
+	rows, err := s.db.Query(`
+		SELECT i.id, i.text, i.subproject, i.status, i.author_slack_id,
+		       COALESCE(t.jira_key, ''), COALESCE(t.jira_url, ''),
+		       COALESCE(p.draft_json, ''),
+		       i.created_at, i.updated_at
+		FROM items i
+		LEFT JOIN proposals p ON p.item_id = i.id
+		LEFT JOIN tickets t ON t.proposal_id = p.id
+		GROUP BY i.id
+		ORDER BY i.created_at DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DashboardRow
+	for rows.Next() {
+		var r DashboardRow
+		var draftJSON string
+		if err := rows.Scan(&r.ItemID, &r.Text, &r.Subproject, &r.Status, &r.AuthorSlack,
+			&r.JiraKey, &r.JiraURL, &draftJSON, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if draftJSON != "" {
+			var d struct {
+				EpicKey string `json:"epic_key"`
+			}
+			json.Unmarshal([]byte(draftJSON), &d)
+			r.EpicKey = d.EpicKey
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListRecentTicketKeys(since time.Time) ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT jira_key FROM tickets WHERE created_at >= ? ORDER BY created_at DESC`, since.UTC().Format("2006-01-02 15:04:05"))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}

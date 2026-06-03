@@ -179,6 +179,46 @@ func (c *JiraClient) CreateIssue(in CreateIssueInput) (*CreatedIssue, error) {
 	return &CreatedIssue{Key: out.Key, URL: c.BaseURL + "/browse/" + out.Key}, nil
 }
 
+type JiraIssueDetail struct {
+	Key    string `json:"key"`
+	Fields struct {
+		Summary string `json:"summary"`
+		Parent  *struct {
+			Key    string `json:"key"`
+			Fields struct {
+				Summary   string `json:"summary"`
+				IssueType struct {
+					Name string `json:"name"`
+				} `json:"issuetype"`
+			} `json:"fields"`
+		} `json:"parent"`
+	} `json:"fields"`
+}
+
+func (c *JiraClient) GetIssue(key string) (*JiraIssueDetail, error) {
+	req, _ := http.NewRequest("GET", c.BaseURL+"/rest/api/3/issue/"+key+"?fields=summary,parent", nil)
+	req.SetBasicAuth(c.Email, c.Token)
+	req.Header.Set("Accept", "application/json")
+	httpClient := c.HTTP
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("get issue %d: %s", resp.StatusCode, string(b))
+	}
+	var out JiraIssueDetail
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (c *JiraClient) AddComment(issueKey, text string) error {
 	body, _ := json.Marshal(map[string]any{"body": adfFromText(text)})
 	req, _ := http.NewRequest("POST", c.BaseURL+"/rest/api/3/issue/"+issueKey+"/comment", bytes.NewReader(body))

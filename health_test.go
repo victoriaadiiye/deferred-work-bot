@@ -117,6 +117,67 @@ func TestTrigger_ArchiveAction_SkipsAlreadyTerminal(t *testing.T) {
 	}
 }
 
+func TestDashboard_RendersHTML(t *testing.T) {
+	store := newTestStore(t)
+	store.InsertItem(&Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "fix flaky test", Status: "collecting", ApprovalThreshold: 3})
+	store.InsertItem(&Item{SlackChannel: "C1", SlackTS: "2", AuthorSlackID: "U1", Text: "add metrics", Status: "ticketed", ApprovalThreshold: 3})
+	w := &Worker{queue: make(chan job, 1)}
+	srv := NewHealthServer(HealthDeps{Store: store, Worker: w})
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code: %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Deferred Work Dashboard") {
+		t.Fatal("missing title")
+	}
+	if !strings.Contains(body, "fix flaky test") {
+		t.Fatal("missing item text")
+	}
+	if !strings.Contains(body, "collecting") || !strings.Contains(body, "ticketed") {
+		t.Fatal("missing status badges")
+	}
+}
+
+func TestDashboard_Empty(t *testing.T) {
+	store := newTestStore(t)
+	w := &Worker{queue: make(chan job, 1)}
+	srv := NewHealthServer(HealthDeps{Store: store, Worker: w})
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code: %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "No deferred work items yet") {
+		t.Fatal("missing empty state message")
+	}
+}
+
+func TestDashboard_WithJiraLinks(t *testing.T) {
+	store := newTestStore(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "do thing", Status: "ticketed", ApprovalThreshold: 3}
+	store.InsertItem(it)
+	p := &Proposal{ItemID: it.ID, SlackTS: "2", DraftJSON: `{"epic_key":"QORK-440"}`, RelatedTicketsJSON: "[]", Branch: "new", Status: "filed"}
+	store.InsertProposal(p)
+	store.InsertTicket(&Ticket{ProposalID: p.ID, JiraKey: "QORK-100", JiraURL: "https://jira.example/browse/QORK-100", Action: "created"})
+
+	w := &Worker{queue: make(chan job, 1)}
+	srv := NewHealthServer(HealthDeps{Store: store, Worker: w})
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, "QORK-100") {
+		t.Fatal("missing jira key")
+	}
+	if !strings.Contains(body, "https://jira.example/browse/QORK-100") {
+		t.Fatal("missing jira link")
+	}
+	if !strings.Contains(body, "QORK-440") {
+		t.Fatal("missing epic key")
+	}
+}
+
 func TestTrigger_EnqueuesProposeJob(t *testing.T) {
 	store := newTestStore(t)
 	store.InsertItem(&Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "x", Status: "collecting", ApprovalThreshold: 3})

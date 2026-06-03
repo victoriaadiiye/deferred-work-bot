@@ -164,6 +164,7 @@ type fakeJira struct {
 	failSearch bool
 	accountID  string
 	epics      []JiraIssue
+	issues     map[string]*JiraIssueDetail
 	lastCreate CreateIssueInput
 }
 
@@ -175,6 +176,14 @@ func (f *fakeJira) Search(in JiraSearchInput) ([]JiraIssue, error) {
 }
 func (f *fakeJira) SearchEpics(projects []string, limit int) ([]JiraIssue, error) {
 	return f.epics, nil
+}
+func (f *fakeJira) GetIssue(key string) (*JiraIssueDetail, error) {
+	if f.issues != nil {
+		if d, ok := f.issues[key]; ok {
+			return d, nil
+		}
+	}
+	return nil, fmt.Errorf("issue %s not found", key)
 }
 func (f *fakeJira) CreateIssue(in CreateIssueInput) (*CreatedIssue, error) {
 	f.lastCreate = in

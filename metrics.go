@@ -34,6 +34,14 @@ func (mj *metricsJira) SearchEpics(projects []string, limit int) ([]JiraIssue, e
 	return res, err
 }
 
+func (mj *metricsJira) GetIssue(key string) (*JiraIssueDetail, error) {
+	res, err := mj.inner.GetIssue(key)
+	if err != nil {
+		mj.metrics.IncJiraError()
+	}
+	return res, err
+}
+
 func (mj *metricsJira) CreateIssue(in CreateIssueInput) (*CreatedIssue, error) {
 	res, err := mj.inner.CreateIssue(in)
 	if err != nil {
