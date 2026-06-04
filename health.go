@@ -26,6 +26,7 @@ func (h *HealthServer) handler() http.Handler {
 	mux.HandleFunc("/health", h.health)
 	mux.HandleFunc("/metrics", h.metrics)
 	mux.HandleFunc("/trigger", h.trigger)
+	mux.HandleFunc("/file-now", h.fileNow)
 	return mux
 }
 
@@ -99,4 +100,30 @@ func (h *HealthServer) trigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(202)
+}
+
+// fileNow advances a collecting item straight to proposal, mirroring the
+// Slack "@bot file now" command. Form POST from the dashboard; no auth,
+// same trust level as the dashboard itself.
+func (h *HealthServer) fileNow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "method", 405)
+		return
+	}
+	itemID, err := strconv.ParseInt(r.FormValue("item_id"), 10, 64)
+	if err != nil {
+		http.Error(w, "bad item_id", 400)
+		return
+	}
+	it, err := h.deps.Store.GetItemByID(itemID)
+	if err != nil {
+		http.Error(w, "item not found", 404)
+		return
+	}
+	if it.Status == "collecting" {
+		h.deps.Store.UpdateItemStatus(it.ID, "proposing")
+		h.deps.Store.LogEvent(&it.ID, "advanced", `{"reason":"file_now","via":"dashboard"}`)
+		h.deps.Worker.Submit(ProposeJob{ItemID: it.ID})
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

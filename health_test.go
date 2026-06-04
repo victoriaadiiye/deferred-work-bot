@@ -196,3 +196,93 @@ func TestTrigger_EnqueuesProposeJob(t *testing.T) {
 		t.Fatal("expected job enqueued")
 	}
 }
+
+func TestFileNow_AdvancesCollectingItem(t *testing.T) {
+	srv, store, _, w := newTestHealthServer(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "collecting", ApprovalThreshold: 3}
+	store.InsertItem(it)
+
+	req := httptest.NewRequest("POST", "/file-now", strings.NewReader("item_id=1"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, req)
+
+	if rec.Code != 303 {
+		t.Fatalf("code: %d, body: %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/" {
+		t.Fatalf("expected redirect to /, got %q", loc)
+	}
+	got, _ := store.GetItemByID(it.ID)
+	if got.Status != "proposing" {
+		t.Fatalf("expected proposing, got %s", got.Status)
+	}
+	select {
+	case j := <-w.queue:
+		if pj, ok := j.(ProposeJob); !ok || pj.ItemID != it.ID {
+			t.Fatalf("expected ProposeJob for item %d, got %+v", it.ID, j)
+		}
+	default:
+		t.Fatal("expected ProposeJob enqueued")
+	}
+	events, _ := store.ListEventsForItem(it.ID)
+	found := false
+	for _, ev := range events {
+		if ev.Kind == "advanced" && strings.Contains(ev.Payload, `"reason":"file_now"`) && strings.Contains(ev.Payload, `"via":"dashboard"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected advanced event with reason=file_now via=dashboard")
+	}
+}
+
+func TestFileNow_NonCollectingIsNoop(t *testing.T) {
+	srv, store, _, w := newTestHealthServer(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "ticketed", ApprovalThreshold: 3}
+	store.InsertItem(it)
+
+	req := httptest.NewRequest("POST", "/file-now", strings.NewReader("item_id=1"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, req)
+
+	if rec.Code != 303 {
+		t.Fatalf("code: %d", rec.Code)
+	}
+	got, _ := store.GetItemByID(it.ID)
+	if got.Status != "ticketed" {
+		t.Fatalf("status should not change, got %s", got.Status)
+	}
+	select {
+	case <-w.queue:
+		t.Fatal("no job should be enqueued")
+	default:
+	}
+}
+
+func TestFileNow_Errors(t *testing.T) {
+	srv, _, _, _ := newTestHealthServer(t)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/file-now", nil))
+	if rec.Code != 405 {
+		t.Fatalf("GET should be 405, got %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/file-now", strings.NewReader("item_id=abc"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	srv.handler().ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("bad item_id should be 400, got %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest("POST", "/file-now", strings.NewReader("item_id=999"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	srv.handler().ServeHTTP(rec, req)
+	if rec.Code != 404 {
+		t.Fatalf("unknown item should be 404, got %d", rec.Code)
+	}
+}
