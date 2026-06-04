@@ -351,6 +351,48 @@ func (s *Store) ListEventsForItem(itemID int64) ([]*Event, error) {
 	return out, rows.Err()
 }
 
+// EventRow is an event joined with its item's text for display.
+type EventRow struct {
+	Event
+	ItemText string
+}
+
+// ListRecentEvents returns events newest first, optionally filtered to one
+// item, with the owning item's text joined in (empty for itemless events).
+func (s *Store) ListRecentEvents(limit int, itemID *int64) ([]EventRow, error) {
+	if limit == 0 {
+		limit = 200
+	}
+	q := `SELECT e.id, e.item_id, e.kind, e.payload_json, e.created_at, COALESCE(i.text, '')
+		FROM events e LEFT JOIN items i ON i.id = e.item_id`
+	args := []any{}
+	if itemID != nil {
+		q += ` WHERE e.item_id = ?`
+		args = append(args, *itemID)
+	}
+	q += ` ORDER BY e.id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []EventRow
+	for rows.Next() {
+		var e EventRow
+		var iid sql.NullInt64
+		if err := rows.Scan(&e.ID, &iid, &e.Kind, &e.Payload, &e.CreatedAt, &e.ItemText); err != nil {
+			return nil, err
+		}
+		if iid.Valid {
+			v := iid.Int64
+			e.ItemID = &v
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) UpdateItemReminderTimes(id int64, lastReminder, warning *time.Time) error {
 	_, err := s.db.Exec(`UPDATE items SET last_reminder_at = ?, warning_posted_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, lastReminder, warning, id)
 	return err

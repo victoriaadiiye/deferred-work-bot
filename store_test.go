@@ -224,3 +224,54 @@ func TestStore_LogEvent(t *testing.T) {
 		t.Fatalf("event mismatch: %+v", events)
 	}
 }
+
+func TestListRecentEvents(t *testing.T) {
+	s := newTestStore(t)
+	it1 := &Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "first item", Status: "collecting", ApprovalThreshold: 3}
+	s.InsertItem(it1)
+	it2 := &Item{SlackChannel: "C1", SlackTS: "2", AuthorSlackID: "U1", Text: "second item", Status: "collecting", ApprovalThreshold: 3}
+	s.InsertItem(it2)
+	s.LogEvent(&it1.ID, "created", "{}")
+	s.LogEvent(&it2.ID, "created", "{}")
+	s.LogEvent(&it1.ID, "vote", `{"user":"U2"}`)
+	s.LogEvent(nil, "system", "{}")
+
+	all, err := s.ListRecentEvents(200, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 4 {
+		t.Fatalf("expected 4 events, got %d", len(all))
+	}
+	// Newest first.
+	if all[0].Kind != "system" {
+		t.Fatalf("expected newest event first, got %s", all[0].Kind)
+	}
+	if all[0].ItemID != nil {
+		t.Fatal("system event should have nil ItemID")
+	}
+	if all[1].Kind != "vote" || all[1].ItemText != "first item" {
+		t.Fatalf("expected vote on 'first item', got %s / %q", all[1].Kind, all[1].ItemText)
+	}
+
+	only1, err := s.ListRecentEvents(200, &it1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(only1) != 2 {
+		t.Fatalf("expected 2 events for item 1, got %d", len(only1))
+	}
+	for _, e := range only1 {
+		if e.ItemID == nil || *e.ItemID != it1.ID {
+			t.Fatalf("filter leaked event for other item: %+v", e)
+		}
+	}
+
+	lim, err := s.ListRecentEvents(1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lim) != 1 || lim[0].Kind != "system" {
+		t.Fatalf("limit not respected: %+v", lim)
+	}
+}
