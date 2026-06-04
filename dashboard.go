@@ -64,6 +64,7 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, pageHead)
+	fmt.Fprint(w, `<h1>Deferred Work Dashboard</h1>`)
 	fmt.Fprintf(w, `<div class="stats">`)
 	statLabels := []string{"Collecting", "Proposing", "Ticketed", "Commented", "Cancelled", "Archived"}
 	for i, label := range statLabels {
@@ -80,7 +81,7 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Fprint(w, `<table><thead><tr>`)
-	fmt.Fprint(w, `<th>Status</th><th>Text</th><th>Subproject</th><th>Jira</th><th>Epic</th><th>Age</th>`)
+	fmt.Fprint(w, `<th>Status</th><th>Text</th><th>Subproject</th><th>Jira</th><th>Epic</th><th>Age</th><th>Actions</th>`)
 	fmt.Fprint(w, `</tr></thead><tbody>`)
 
 	for _, row := range visible {
@@ -117,7 +118,13 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 			subproject = "-"
 		}
 
-		fmt.Fprintf(w, `<tr><td><span class="badge %s">%s</span></td><td class="text-cell" title="%s">%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+		actionsCell := "-"
+		if row.Status == "collecting" {
+			actionsCell = fmt.Sprintf(`<form method="post" action="/file-now"><input type="hidden" name="item_id" value="%d"><button class="file-now-btn" type="submit">File now</button></form>`, row.ItemID)
+		}
+
+		fmt.Fprintf(
+			w, `<tr><td><span class="badge %s">%s</span></td><td class="text-cell" title="%s">%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
 			statusClass,
 			html.EscapeString(row.Status),
 			html.EscapeString(row.Text),
@@ -126,6 +133,7 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 			jiraCell,
 			epicCell,
 			ageStr,
+			actionsCell,
 		)
 	}
 
@@ -206,6 +214,14 @@ const pageHead = `<!DOCTYPE html>
   .stat-card.commented .stat-num { color: #58a6ff; }
   .stat-card.cancelled .stat-num { color: #8b949e; }
   .stat-card.archived .stat-num { color: #484f58; }
+  .nav { display: flex; gap: 1rem; margin-bottom: 1rem; }
+  .nav a { color: #8b949e; font-size: 0.9rem; }
+  .nav a:hover { color: #58a6ff; text-decoration: none; }
+  .file-now-btn {
+    background: #238636; color: #fff; border: none; border-radius: 6px;
+    padding: 4px 10px; font-size: 0.78rem; cursor: pointer; font-weight: 500;
+  }
+  .file-now-btn:hover { background: #2ea043; }
   table {
     width: 100%;
     border-collapse: collapse;
@@ -248,7 +264,7 @@ const pageHead = `<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>Deferred Work Dashboard</h1>
+<div class="nav"><a href="/">Dashboard</a><a href="/logs">Logs</a></div>
 `
 
 const pageFooter = `

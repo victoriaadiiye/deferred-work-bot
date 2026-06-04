@@ -286,3 +286,27 @@ func TestFileNow_Errors(t *testing.T) {
 		t.Fatalf("unknown item should be 404, got %d", rec.Code)
 	}
 }
+
+func TestDashboard_FileNowButtonOnlyOnCollecting(t *testing.T) {
+	store := newTestStore(t)
+	store.InsertItem(&Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "still collecting", Status: "collecting", ApprovalThreshold: 3})
+	store.InsertItem(&Item{SlackChannel: "C1", SlackTS: "2", AuthorSlackID: "U1", Text: "already ticketed", Status: "ticketed", ApprovalThreshold: 3})
+	w := &Worker{queue: make(chan job, 1)}
+	srv := NewHealthServer(HealthDeps{Store: store, Worker: w})
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	body := rec.Body.String()
+
+	if !strings.Contains(body, `action="/file-now"`) {
+		t.Fatal("expected file-now form on collecting row")
+	}
+	if !strings.Contains(body, `name="item_id" value="1"`) {
+		t.Fatal("expected hidden item_id=1 input")
+	}
+	if strings.Count(body, `action="/file-now"`) != 1 {
+		t.Fatal("file-now form should only appear on collecting rows")
+	}
+	if !strings.Contains(body, `href="/logs"`) {
+		t.Fatal("expected nav link to /logs")
+	}
+}
