@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -256,12 +257,12 @@ func TestTrigger_EnqueuesProposeJob(t *testing.T) {
 	}
 }
 
-func TestFileNow_AdvancesCollectingItem(t *testing.T) {
+func TestPropose_AdvancesCollectingItem(t *testing.T) {
 	srv, store, _, w := newTestHealthServer(t)
 	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "collecting", ApprovalThreshold: 3}
 	store.InsertItem(it)
 
-	req := httptest.NewRequest("POST", "/file-now", strings.NewReader("item_id=1"))
+	req := httptest.NewRequest("POST", "/propose", strings.NewReader("item_id=1"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := httptest.NewRecorder()
 	srv.handler().ServeHTTP(rec, req)
@@ -283,6 +284,79 @@ func TestFileNow_AdvancesCollectingItem(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected ProposeJob enqueued")
+	}
+	events, _ := store.ListEventsForItem(it.ID)
+	found := false
+	for _, ev := range events {
+		if ev.Kind == "advanced" && strings.Contains(ev.Payload, `"reason":"propose"`) && strings.Contains(ev.Payload, `"via":"dashboard"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected advanced event with reason=propose via=dashboard")
+	}
+}
+
+func TestPropose_RegeneratesProposingItem(t *testing.T) {
+	srv, store, _, w := newTestHealthServer(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "proposing", ApprovalThreshold: 3}
+	store.InsertItem(it)
+
+	req := httptest.NewRequest("POST", "/propose", strings.NewReader("item_id=1"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, req)
+
+	if rec.Code != 303 {
+		t.Fatalf("code: %d, body: %s", rec.Code, rec.Body.String())
+	}
+	// Status stays proposing; a fresh ProposeJob is enqueued (regen).
+	got, _ := store.GetItemByID(it.ID)
+	if got.Status != "proposing" {
+		t.Fatalf("expected proposing, got %s", got.Status)
+	}
+	select {
+	case j := <-w.queue:
+		if pj, ok := j.(ProposeJob); !ok || pj.ItemID != it.ID {
+			t.Fatalf("expected ProposeJob for item %d, got %+v", it.ID, j)
+		}
+	default:
+		t.Fatal("expected ProposeJob enqueued")
+	}
+	events, _ := store.ListEventsForItem(it.ID)
+	found := false
+	for _, ev := range events {
+		if ev.Kind == "regen" && strings.Contains(ev.Payload, `"via":"dashboard"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected regen event via=dashboard")
+	}
+}
+
+func TestFileNow_FilesProposedItem(t *testing.T) {
+	srv, store, _, w := newTestHealthServer(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "proposed", ApprovalThreshold: 3}
+	store.InsertItem(it)
+	p := &Proposal{ItemID: it.ID, SlackTS: "1700.2", DraftJSON: "{}", RelatedTicketsJSON: "[]", Branch: "new", Status: "draft"}
+	store.InsertProposal(p)
+
+	req := httptest.NewRequest("POST", "/file-now", strings.NewReader("item_id=1"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, req)
+
+	if rec.Code != 303 {
+		t.Fatalf("code: %d, body: %s", rec.Code, rec.Body.String())
+	}
+	select {
+	case j := <-w.queue:
+		if fj, ok := j.(FileJob); !ok || fj.ProposalID != p.ID {
+			t.Fatalf("expected FileJob for proposal %d, got %+v", p.ID, j)
+		}
+	default:
+		t.Fatal("expected FileJob enqueued")
 	}
 	events, _ := store.ListEventsForItem(it.ID)
 	found := false
@@ -346,26 +420,86 @@ func TestFileNow_Errors(t *testing.T) {
 	}
 }
 
-func TestDashboard_FileNowButtonOnlyOnCollecting(t *testing.T) {
+func TestDashboard_ActionButtonsByStage(t *testing.T) {
 	store := newTestStore(t)
 	store.InsertItem(&Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "still collecting", Status: "collecting", ApprovalThreshold: 3})
-	store.InsertItem(&Item{SlackChannel: "C1", SlackTS: "2", AuthorSlackID: "U1", Text: "already ticketed", Status: "ticketed", ApprovalThreshold: 3})
+	store.InsertItem(&Item{SlackChannel: "C1", SlackTS: "2", AuthorSlackID: "U1", Text: "generating", Status: "proposing", ApprovalThreshold: 3})
+	store.InsertItem(&Item{SlackChannel: "C1", SlackTS: "3", AuthorSlackID: "U1", Text: "awaiting approval", Status: "proposed", ApprovalThreshold: 3})
+	store.InsertItem(&Item{SlackChannel: "C1", SlackTS: "4", AuthorSlackID: "U1", Text: "already ticketed", Status: "ticketed", ApprovalThreshold: 3})
 	w := &Worker{queue: make(chan job, 1)}
 	srv := NewHealthServer(HealthDeps{Store: store, Worker: w})
 	rec := httptest.NewRecorder()
 	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 	body := rec.Body.String()
 
-	if !strings.Contains(body, `action="/file-now"`) {
-		t.Fatal("expected file-now form on collecting row")
+	// Propose button on collecting + proposing only.
+	if strings.Count(body, `action="/propose"`) != 2 {
+		t.Fatalf("propose form should appear on collecting and proposing rows, got %d", strings.Count(body, `action="/propose"`))
 	}
-	if !strings.Contains(body, `name="item_id" value="1"`) {
-		t.Fatal("expected hidden item_id=1 input")
-	}
+	// File now button on proposed only.
 	if strings.Count(body, `action="/file-now"`) != 1 {
-		t.Fatal("file-now form should only appear on collecting rows")
+		t.Fatalf("file-now form should appear on the proposed row only, got %d", strings.Count(body, `action="/file-now"`))
+	}
+	if !strings.Contains(body, `<input type="hidden" name="item_id" value="3"><button class="file-now-btn"`) {
+		t.Fatal("expected file-now form on proposed row (item_id=3)")
+	}
+	// View link on rows that have a proposal: proposed + ticketed.
+	if strings.Count(body, `href="/proposal?item_id=`) != 2 {
+		t.Fatalf("view link should appear on proposed and ticketed rows, got %d", strings.Count(body, `href="/proposal?item_id=`))
 	}
 	if !strings.Contains(body, `href="/logs"`) {
 		t.Fatal("expected nav link to /logs")
+	}
+}
+
+func TestProposalPage_RendersFullDraft(t *testing.T) {
+	srv, store, _, _ := newTestHealthServer(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "the original long request text", Status: "proposed", ApprovalThreshold: 3}
+	store.InsertItem(it)
+	// A description longer than the 600-char Slack preview cap, to prove the
+	// page renders it untruncated.
+	longDesc := strings.Repeat("alpha beta gamma delta ", 60) // ~1380 chars
+	draft := Draft{Summary: "Fix the widget", Description: longDesc, IssueType: "Task", Priority: "High", Labels: []string{"deferred-work"}}
+	draftJSON, _ := json.Marshal(draft)
+	p := &Proposal{ItemID: it.ID, SlackTS: "1.2", DraftJSON: string(draftJSON), RelatedTicketsJSON: "[]", Branch: "new", Status: "draft"}
+	store.InsertProposal(p)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/proposal?id=1", nil))
+	if rec.Code != 200 {
+		t.Fatalf("code: %d, body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "Fix the widget") {
+		t.Fatal("expected summary in page")
+	}
+	if !strings.Contains(body, "the original long request text") {
+		t.Fatal("expected full request text in page")
+	}
+	if !strings.Contains(body, longDesc) {
+		t.Fatal("expected full (untruncated) description in page")
+	}
+
+	// Also reachable by item_id (latest proposal for the item).
+	rec = httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/proposal?item_id=1", nil))
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "Fix the widget") {
+		t.Fatalf("item_id lookup failed: code %d", rec.Code)
+	}
+}
+
+func TestProposalPage_Errors(t *testing.T) {
+	srv, _, _, _ := newTestHealthServer(t)
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/proposal", nil))
+	if rec.Code != 400 {
+		t.Fatalf("missing id should be 400, got %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/proposal?id=999", nil))
+	if rec.Code != 404 {
+		t.Fatalf("unknown proposal should be 404, got %d", rec.Code)
 	}
 }

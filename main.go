@@ -55,7 +55,7 @@ func main() {
 		Store: store, Slack: api, Claude: claudeRunner,
 		Jira:     newMetricsJira(jira, appMetrics),
 		Projects: projects, Signals: signals, BotUserID: botID,
-		JiraBaseURL: cfg.JiraBaseURL,
+		JiraBaseURL: cfg.JiraBaseURL, PublicBaseURL: cfg.PublicBaseURL,
 	}
 	worker := NewWorker(cfg.Workers, cfg.QueueSize, WorkerDeps{
 		Execute: func(ctx context.Context, j job) error {
@@ -94,7 +94,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	go runTicker(ctx, tk)
 
-	health := NewHealthServer(HealthDeps{Store: store, Worker: worker, TriggerToken: cfg.TriggerToken, Slack: api, Metrics: appMetrics})
+	health := NewHealthServer(HealthDeps{Store: store, Worker: worker, TriggerToken: cfg.TriggerToken, Slack: api, Metrics: appMetrics, PublicBaseURL: cfg.PublicBaseURL})
 	go func() {
 		addr := fmt.Sprintf(":%d", cfg.HealthPort)
 		log.Printf("health listening on %s", addr)

@@ -298,6 +298,33 @@ func (s *Store) UpdateProposalStatus(id int64, status string) error {
 	return err
 }
 
+// UpdateProposalSlackTS records the Slack timestamp of the posted proposal
+// message. Used when the proposal row is inserted before the message is posted
+// (so its id can be embedded in the message as a review link).
+func (s *Store) UpdateProposalSlackTS(id int64, ts string) error {
+	_, err := s.db.Exec(`UPDATE proposals SET slack_ts = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, ts, id)
+	return err
+}
+
+// ListProposalsForItem returns every proposal ever drafted for an item, newest
+// first, so the UI can surface superseded drafts alongside the current one.
+func (s *Store) ListProposalsForItem(itemID int64) ([]Proposal, error) {
+	rows, err := s.db.Query(`SELECT id, item_id, slack_ts, draft_json, related_tickets_json, branch, existing_ticket_key, status, created_at, updated_at FROM proposals WHERE item_id = ? ORDER BY id DESC`, itemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Proposal
+	for rows.Next() {
+		var p Proposal
+		if err := rows.Scan(&p.ID, &p.ItemID, &p.SlackTS, &p.DraftJSON, &p.RelatedTicketsJSON, &p.Branch, &p.ExistingTicketKey, &p.Status, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetProposalBySlackTS(ts string) (*Proposal, error) {
 	row := s.db.QueryRow(`SELECT id, item_id, slack_ts, draft_json, related_tickets_json, branch, existing_ticket_key, status, created_at, updated_at FROM proposals WHERE slack_ts = ?`, ts)
 	var p Proposal
