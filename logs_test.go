@@ -78,4 +78,25 @@ func TestLogs_Empty(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "No events yet") {
 		t.Fatal("missing empty state")
 	}
+	if strings.Contains(rec.Body.String(), "<table>") {
+		t.Fatal("empty table should not render when there are no events")
+	}
+}
+
+func TestLogs_TruncatesPreviewByRunes(t *testing.T) {
+	srv, store, _, _ := newTestHealthServer(t)
+	long := strings.Repeat("é", 80)
+	it := &Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: long, Status: "collecting", ApprovalThreshold: 3}
+	store.InsertItem(it)
+	store.LogEvent(&it.ID, "created", "{}")
+
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/logs", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, strings.Repeat("é", 60)+"...") {
+		t.Fatal("expected rune-safe 60-rune truncated preview")
+	}
+	if strings.Contains(body, "�") {
+		t.Fatal("output contains invalid UTF-8 replacement character")
+	}
 }

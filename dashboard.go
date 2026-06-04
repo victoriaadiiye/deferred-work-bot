@@ -92,10 +92,7 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 		age := time.Since(row.CreatedAt)
 		ageStr := formatAge(age)
 
-		textPreview := row.Text
-		if len(textPreview) > 120 {
-			textPreview = textPreview[:120] + "..."
-		}
+		textPreview := truncateRunes(row.Text, 120)
 
 		jiraCell := "-"
 		if row.JiraKey != "" && row.JiraURL != "" {
@@ -159,6 +156,16 @@ func statusMatches(status, class string) bool {
 	default:
 		return status == class
 	}
+}
+
+// truncateRunes shortens s to at most n runes (not bytes), so multi-byte
+// UTF-8 text is never cut mid-character.
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "..."
 }
 
 func formatAge(d time.Duration) string {
@@ -248,8 +255,9 @@ const pageHead = `<!DOCTYPE html>
     font-size: 0.78rem; font-weight: 500;
     background: #8b949e22; color: #8b949e;
   }
-  .badge.kind-created, .badge.kind-intake { background: #58a6ff22; color: #58a6ff; }
-  .badge.kind-vote, .badge.kind-advanced, .badge.kind-regen { background: #d2a8ff22; color: #d2a8ff; }
+  .badge.kind-created, .badge.kind-intake, .badge.kind-edited { background: #58a6ff22; color: #58a6ff; }
+  .badge.kind-vote, .badge.kind-vote_removed, .badge.kind-advanced, .badge.kind-regen,
+  .badge.kind-project_override, .badge.kind-priority_override, .badge.kind-epic_override { background: #d2a8ff22; color: #d2a8ff; }
   .badge.kind-proposal, .badge.kind-resolution { background: #3fb95022; color: #3fb950; }
   .badge.kind-cancel, .badge.kind-attachment_failed { background: #f8514922; color: #f85149; }
   .badge.kind-reminder, .badge.kind-warning, .badge.kind-archive { background: #f0883e22; color: #f0883e; }
