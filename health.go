@@ -117,9 +117,11 @@ func (h *HealthServer) trigger(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(202)
 }
 
-// fileNow advances a collecting item straight to proposal, mirroring the
-// Slack "@bot file now" command. Form POST from the dashboard; no auth,
-// same trust level as the dashboard itself.
+// fileNow pushes an item forward past the next approval gate, mirroring the
+// Slack "@bot file now" command. From "collecting" it skips the vote threshold
+// and generates the proposal; from "proposed" it skips the approval-reaction
+// gate and files the drafted ticket immediately. Form POST from the dashboard;
+// no auth, same trust level as the dashboard itself.
 func (h *HealthServer) fileNow(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "method", 405)
@@ -135,10 +137,18 @@ func (h *HealthServer) fileNow(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "item not found", 404)
 		return
 	}
-	if it.Status == "collecting" {
+	switch it.Status {
+	case "collecting":
 		h.deps.Store.UpdateItemStatus(it.ID, "proposing")
 		h.deps.Store.LogEvent(&it.ID, "advanced", `{"reason":"file_now","via":"dashboard"}`)
 		h.deps.Worker.Submit(ProposeJob{ItemID: it.ID})
+	case "proposed":
+		// A proposed item has a drafted proposal awaiting approval reactions.
+		// Filing it directly is the dashboard equivalent of an approve react.
+		if p, err := h.deps.Store.GetLatestProposal(it.ID); err == nil && p.Status == "draft" {
+			h.deps.Store.LogEvent(&it.ID, "advanced", `{"reason":"file_now","via":"dashboard"}`)
+			h.deps.Worker.Submit(FileJob{ProposalID: p.ID})
+		}
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

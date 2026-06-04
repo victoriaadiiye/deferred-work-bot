@@ -296,6 +296,41 @@ func TestFileNow_AdvancesCollectingItem(t *testing.T) {
 	}
 }
 
+func TestFileNow_FilesProposedItem(t *testing.T) {
+	srv, store, _, w := newTestHealthServer(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "proposed", ApprovalThreshold: 3}
+	store.InsertItem(it)
+	p := &Proposal{ItemID: it.ID, SlackTS: "1700.2", DraftJSON: "{}", RelatedTicketsJSON: "[]", Branch: "new", Status: "draft"}
+	store.InsertProposal(p)
+
+	req := httptest.NewRequest("POST", "/file-now", strings.NewReader("item_id=1"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	rec := httptest.NewRecorder()
+	srv.handler().ServeHTTP(rec, req)
+
+	if rec.Code != 303 {
+		t.Fatalf("code: %d, body: %s", rec.Code, rec.Body.String())
+	}
+	select {
+	case j := <-w.queue:
+		if fj, ok := j.(FileJob); !ok || fj.ProposalID != p.ID {
+			t.Fatalf("expected FileJob for proposal %d, got %+v", p.ID, j)
+		}
+	default:
+		t.Fatal("expected FileJob enqueued")
+	}
+	events, _ := store.ListEventsForItem(it.ID)
+	found := false
+	for _, ev := range events {
+		if ev.Kind == "advanced" && strings.Contains(ev.Payload, `"reason":"file_now"`) && strings.Contains(ev.Payload, `"via":"dashboard"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected advanced event with reason=file_now via=dashboard")
+	}
+}
+
 func TestFileNow_NonCollectingIsNoop(t *testing.T) {
 	srv, store, _, w := newTestHealthServer(t)
 	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "ticketed", ApprovalThreshold: 3}
@@ -346,10 +381,11 @@ func TestFileNow_Errors(t *testing.T) {
 	}
 }
 
-func TestDashboard_FileNowButtonOnlyOnCollecting(t *testing.T) {
+func TestDashboard_FileNowButtonOnCollectingAndProposed(t *testing.T) {
 	store := newTestStore(t)
 	store.InsertItem(&Item{SlackChannel: "C1", SlackTS: "1", AuthorSlackID: "U1", Text: "still collecting", Status: "collecting", ApprovalThreshold: 3})
 	store.InsertItem(&Item{SlackChannel: "C1", SlackTS: "2", AuthorSlackID: "U1", Text: "already ticketed", Status: "ticketed", ApprovalThreshold: 3})
+	store.InsertItem(&Item{SlackChannel: "C1", SlackTS: "3", AuthorSlackID: "U1", Text: "awaiting approval", Status: "proposed", ApprovalThreshold: 3})
 	w := &Worker{queue: make(chan job, 1)}
 	srv := NewHealthServer(HealthDeps{Store: store, Worker: w})
 	rec := httptest.NewRecorder()
@@ -362,8 +398,12 @@ func TestDashboard_FileNowButtonOnlyOnCollecting(t *testing.T) {
 	if !strings.Contains(body, `name="item_id" value="1"`) {
 		t.Fatal("expected hidden item_id=1 input")
 	}
-	if strings.Count(body, `action="/file-now"`) != 1 {
-		t.Fatal("file-now form should only appear on collecting rows")
+	if !strings.Contains(body, `name="item_id" value="3"`) {
+		t.Fatal("expected file-now form on proposed row (item_id=3)")
+	}
+	// Two file-now forms: the collecting row and the proposed row, not the ticketed one.
+	if strings.Count(body, `action="/file-now"`) != 2 {
+		t.Fatalf("file-now form should appear on collecting and proposed rows only, got %d", strings.Count(body, `action="/file-now"`))
 	}
 	if !strings.Contains(body, `href="/logs"`) {
 		t.Fatal("expected nav link to /logs")

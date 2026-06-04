@@ -116,11 +116,12 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 			subproject = "-"
 		}
 
-		// File-now applies to collecting items; cancelling makes sense while an
-		// item is still in flight. Terminal items (ticketed/commented/cancelled/
-		// archived) show a dash.
+		// File-now skips the next approval gate: from "collecting" it forces the
+		// proposal, from "proposed" it files the drafted ticket without waiting on
+		// approval reactions. Cancelling makes sense while an item is still in
+		// flight. Terminal items (ticketed/commented/cancelled/archived) show a dash.
 		var actions []string
-		if row.Status == "collecting" {
+		if row.Status == "collecting" || row.Status == "proposed" {
 			actions = append(actions, fmt.Sprintf(`<form method="post" action="/file-now"><input type="hidden" name="item_id" value="%d"><button class="file-now-btn" type="submit">File now</button></form>`, row.ItemID))
 		}
 		if !isTerminal(row.Status) {
