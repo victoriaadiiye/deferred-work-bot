@@ -23,6 +23,7 @@ func NewHealthServer(d HealthDeps) *HealthServer { return &HealthServer{deps: d}
 func (h *HealthServer) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", h.dashboard)
+	mux.HandleFunc("/logs", h.logsPage)
 	mux.HandleFunc("/health", h.health)
 	mux.HandleFunc("/metrics", h.metrics)
 	mux.HandleFunc("/trigger", h.trigger)

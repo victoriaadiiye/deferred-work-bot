@@ -72,7 +72,11 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 		if filter == statClasses[i] {
 			active = " active"
 		}
-		fmt.Fprintf(w, `<a class="stat-card %s%s" href="?status=%s"><div class="stat-num">%d</div><div class="stat-label">%s</div></a>`, statClasses[i], active, statClasses[i], counts[i], label)
+		cardClass := statClasses[i]
+		if cardClass == "cancelled" {
+			cardClass = "deferred"
+		}
+		fmt.Fprintf(w, `<a class="stat-card %s%s" href="?status=%s"><div class="stat-num">%d</div><div class="stat-label">%s</div></a>`, cardClass, active, statClasses[i], counts[i], label)
 	}
 	fmt.Fprint(w, `</div>`)
 
@@ -88,6 +92,9 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 		statusClass := row.Status
 		if statusClass == "commented_on_existing" {
 			statusClass = "commented"
+		}
+		if statusClass == "cancelled" {
+			statusClass = "deferred"
 		}
 		age := time.Since(row.CreatedAt)
 		ageStr := formatAge(age)
@@ -212,7 +219,7 @@ const pageHead = `<!DOCTYPE html>
   .stat-card.proposing .stat-num { color: #d2a8ff; }
   .stat-card.ticketed .stat-num { color: #3fb950; }
   .stat-card.commented .stat-num { color: #58a6ff; }
-  .stat-card.cancelled .stat-num { color: #8b949e; }
+  .stat-card.deferred .stat-num { color: #8b949e; }
   .stat-card.archived .stat-num { color: #484f58; }
   .nav { display: flex; gap: 1rem; margin-bottom: 1rem; }
   .nav a { color: #8b949e; font-size: 0.9rem; }
@@ -246,12 +253,24 @@ const pageHead = `<!DOCTYPE html>
   .badge {
     display: inline-block; padding: 2px 10px; border-radius: 12px;
     font-size: 0.78rem; font-weight: 500;
+    background: #8b949e22; color: #8b949e;
   }
+  .badge.kind-created, .badge.kind-intake { background: #58a6ff22; color: #58a6ff; }
+  .badge.kind-vote, .badge.kind-advanced, .badge.kind-regen { background: #d2a8ff22; color: #d2a8ff; }
+  .badge.kind-proposal, .badge.kind-resolution { background: #3fb95022; color: #3fb950; }
+  .badge.kind-attachment_failed { background: #f8514922; color: #f85149; }
+  .badge.kind-reminder, .badge.kind-warning, .badge.kind-archive { background: #f0883e22; color: #f0883e; }
+  .payload {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem; color: #8b949e;
+    max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .age { color: #8b949e; font-size: 0.8rem; }
   .badge.collecting { background: #f0883e22; color: #f0883e; }
   .badge.proposing, .badge.proposed { background: #d2a8ff22; color: #d2a8ff; }
   .badge.ticketed { background: #3fb95022; color: #3fb950; }
   .badge.commented, .badge.commented_on_existing { background: #58a6ff22; color: #58a6ff; }
-  .badge.cancelled { background: #8b949e22; color: #8b949e; }
+  .badge.deferred { background: #8b949e22; color: #8b949e; }
   .badge.archived { background: #484f5822; color: #484f58; }
   .empty { text-align: center; color: #8b949e; padding: 3rem; }
   @media (max-width: 768px) {
