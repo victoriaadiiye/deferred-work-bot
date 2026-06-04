@@ -17,8 +17,8 @@ func TestJobExecutor_ProposeFlow_NewBranch(t *testing.T) {
 	store.InsertItem(it)
 	ex := &JobExecutor{
 		Store: store, Slack: fake, Claude: fc, Jira: jc,
-		Projects: &ProjectsConfig{Subprojects: []string{"qompass"}, QORKProjects: []string{"QORK"}},
-		Signals:  &SignalsConfig{},
+		Projects:  &ProjectsConfig{Subprojects: []string{"qompass"}, QORKProjects: []string{"QORK"}},
+		Signals:   &SignalsConfig{},
 		BotUserID: "UBOT",
 	}
 	if err := ex.Execute(context.Background(), ProposeJob{ItemID: it.ID}); err != nil {
@@ -86,6 +86,95 @@ func TestJobExecutor_FileFlow_RedraftsWhenBranchChangedFromAwaitingResolution(t 
 	// fc.resp set summary to "redrafted summary" — verify Claude was called to redraft.
 	if len(fc.got) == 0 {
 		t.Fatal("expected Claude to be called to redraft")
+	}
+}
+
+func TestJobExecutor_FileFlow_AssignsAuthor(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	fake.users = map[string]*slack.User{
+		"U1": {ID: "U1", Profile: slack.UserProfile{Email: "author@qumulo.com"}},
+	}
+	fc := &fakeClaude{resp: `{"summary":"synth","description":"d","epic":""}`}
+	jc := &fakeJira{accountID: "jira-acct-123"}
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "proposed", ApprovalThreshold: 3}
+	store.InsertItem(it)
+	p := &Proposal{
+		ItemID:             it.ID,
+		SlackTS:            "1700.2",
+		DraftJSON:          `{"summary":"do x","description":"d","issue_type":"Task","labels":["deferred-work"],"priority":"Medium"}`,
+		RelatedTicketsJSON: "[]",
+		Branch:             "new",
+		Status:             "draft",
+	}
+	store.InsertProposal(p)
+	ex := &JobExecutor{
+		Store: store, Slack: fake, Claude: fc, Jira: jc,
+		Projects:  &ProjectsConfig{QORKProjects: []string{"QORK"}},
+		Signals:   &SignalsConfig{},
+		BotUserID: "UBOT",
+	}
+	if err := ex.Execute(context.Background(), FileJob{ProposalID: p.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if jc.lastCreate.AssigneeAccountID != "jira-acct-123" {
+		t.Fatalf("expected ticket assigned to author's Jira account, got %q", jc.lastCreate.AssigneeAccountID)
+	}
+	var filed *postedMsg
+	for i := range fake.posted {
+		if strings.HasPrefix(fake.posted[i].Text, "Filed:") {
+			filed = &fake.posted[i]
+		}
+	}
+	if filed == nil || !strings.Contains(filed.Text, "assigned to <@U1>") {
+		t.Fatalf("expected assignment surfaced in confirmation, got %+v", filed)
+	}
+}
+
+func TestJobExecutor_FileFlow_UnresolvedAssigneeIsObservable(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	// No email on the author (e.g. bot token missing users:read.email scope).
+	fake.users = map[string]*slack.User{"U1": {ID: "U1"}}
+	fc := &fakeClaude{resp: `{"summary":"synth","description":"d","epic":""}`}
+	jc := &fakeJira{}
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "proposed", ApprovalThreshold: 3}
+	store.InsertItem(it)
+	p := &Proposal{
+		ItemID:             it.ID,
+		SlackTS:            "1700.2",
+		DraftJSON:          `{"summary":"do x","description":"d","issue_type":"Task","labels":["deferred-work"],"priority":"Medium"}`,
+		RelatedTicketsJSON: "[]",
+		Branch:             "new",
+		Status:             "draft",
+	}
+	store.InsertProposal(p)
+	ex := &JobExecutor{
+		Store: store, Slack: fake, Claude: fc, Jira: jc,
+		Projects:  &ProjectsConfig{QORKProjects: []string{"QORK"}},
+		Signals:   &SignalsConfig{},
+		BotUserID: "UBOT",
+	}
+	if err := ex.Execute(context.Background(), FileJob{ProposalID: p.ID}); err != nil {
+		t.Fatal(err)
+	}
+	// Ticket still files, just unassigned.
+	if jc.createdKey != "QORK-100" {
+		t.Fatal("ticket should still be filed when assignee can't be resolved")
+	}
+	if jc.lastCreate.AssigneeAccountID != "" {
+		t.Fatalf("expected no assignee, got %q", jc.lastCreate.AssigneeAccountID)
+	}
+	// The miss is logged so it's diagnosable rather than silent.
+	events, _ := store.ListEventsForItem(it.ID)
+	found := false
+	for _, ev := range events {
+		if ev.Kind == "assignee_unresolved" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected assignee_unresolved event to be logged")
 	}
 }
 

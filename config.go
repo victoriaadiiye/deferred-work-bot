@@ -20,6 +20,7 @@ type Config struct {
 	JiraQORKProjects     []string
 	ApprovalThreshold    int
 	AuthorCanApprove     bool
+	ProposalMinWords     int
 	ReminderIntervalDays int
 	WarningAtDays        int
 	ArchiveGraceDays     int
@@ -54,6 +55,7 @@ func LoadConfig() (*Config, error) {
 		JiraQORKProjects:     splitCSV(os.Getenv("JIRA_QORK_PROJECTS")),
 		ApprovalThreshold:    intEnv("APPROVAL_THRESHOLD", 3),
 		AuthorCanApprove:     boolEnv("AUTHOR_CAN_APPROVE", false),
+		ProposalMinWords:     intEnv("PROPOSAL_MIN_WORDS", minProposalWords),
 		ReminderIntervalDays: intEnv("REMINDER_INTERVAL_DAYS", 3),
 		WarningAtDays:        intEnv("WARNING_AT_DAYS", 10),
 		ArchiveGraceDays:     intEnv("ARCHIVE_GRACE_DAYS", 3),

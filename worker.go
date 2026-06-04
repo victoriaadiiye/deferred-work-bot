@@ -27,6 +27,19 @@ type IntakeJob struct{ ItemID int64 }
 
 func (IntakeJob) kind() string { return "intake" }
 
+// ClassifyJob asks Claude whether a watched-channel message actually proposes
+// trackable work before the bot creates an item for it. It carries the raw
+// message because no item row exists yet — one is created only on a "yes".
+type ClassifyJob struct {
+	Channel           string
+	TS                string
+	User              string
+	Text              string
+	ApprovalThreshold int
+}
+
+func (ClassifyJob) kind() string { return "classify" }
+
 type WorkerDeps struct {
 	Execute func(ctx context.Context, j job) error
 	Logger  func(format string, args ...any)

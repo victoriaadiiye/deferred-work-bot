@@ -192,7 +192,7 @@ func TestRenderProposalMessage_NewBranch(t *testing.T) {
 		Labels:      []string{"deferred-work", "qompass"},
 		Priority:    "Medium",
 	}
-	out := RenderProposalMessage(d, []RelatedTicket{}, "new", "", false)
+	out := RenderProposalMessage(d, []RelatedTicket{}, "new", "", false, "https://qumulo.atlassian.net")
 	if !strings.Contains(out, "Fix flaky test") || !strings.Contains(out, "Task") || !strings.Contains(out, "Medium") {
 		t.Fatalf("missing fields:\n%s", out)
 	}
@@ -202,7 +202,7 @@ func TestRenderProposalMessage_NewBranch(t *testing.T) {
 }
 
 func TestRenderProposalMessage_EncompassedBranch(t *testing.T) {
-	out := RenderProposalMessage(nil, []RelatedTicket{{Key: "QORK-5", Verdict: "encompassed"}}, "awaiting_resolution", "QORK-5", false)
+	out := RenderProposalMessage(nil, []RelatedTicket{{Key: "QORK-5", Verdict: "encompassed"}}, "awaiting_resolution", "QORK-5", false, "https://qumulo.atlassian.net")
 	if !strings.Contains(out, "QORK-5") || !strings.Contains(out, "encompassed") {
 		t.Fatalf("missing encompassed banner: %s", out)
 	}
@@ -213,19 +213,19 @@ func TestRenderProposalMessage_EncompassedBranch(t *testing.T) {
 
 func TestRenderProposalMessage_TTLBanner(t *testing.T) {
 	d := &Draft{Summary: "x", IssueType: "Task", Priority: "Low"}
-	out := RenderProposalMessage(d, nil, "new", "", true)
+	out := RenderProposalMessage(d, nil, "new", "", true, "https://qumulo.atlassian.net")
 	if !strings.Contains(out, "no response") {
 		t.Fatalf("missing TTL banner: %s", out)
 	}
 }
 
 type fakeJira struct {
-	createdKey string
-	createdURL string
-	comments   []struct{ Key, Text string }
-	labels     []struct{ Key, Label string }
-	failSearch bool
-	accountID  string
+	createdKey  string
+	createdURL  string
+	comments    []struct{ Key, Text string }
+	labels      []struct{ Key, Label string }
+	failSearch  bool
+	accountID   string
 	epics       []JiraIssue
 	issues      map[string]*JiraIssueDetail
 	lastCreate  CreateIssueInput
