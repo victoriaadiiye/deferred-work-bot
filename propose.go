@@ -868,6 +868,18 @@ func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {
 		return nil
 	}
 
+	// Atomically claim the proposal before doing any work that could reach Jira.
+	// The draft check above is only a fast path; this CAS is the real lock that
+	// makes filing exactly-once. If another worker already claimed (or filed)
+	// this proposal, abort silently — we must never create a second ticket.
+	won, err := e.Store.ClaimProposalForFiling(p.ID)
+	if err != nil {
+		return err
+	}
+	if !won {
+		return nil
+	}
+
 	var draft Draft
 	json.Unmarshal([]byte(p.DraftJSON), &draft)
 
@@ -908,6 +920,9 @@ func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {
 			EpicCandidates: candidates,
 		})
 		if err != nil {
+			// No Jira call has happened yet, so release the claim back to
+			// "draft" — the proposal is safe to re-file later.
+			e.Store.UpdateProposalStatus(p.ID, "draft")
 			e.Slack.PostMessage(it.SlackChannel,
 				slack.MsgOptionText(":warning: Failed to draft ticket: "+err.Error(), false),
 				slack.MsgOptionTS(it.SlackTS))
@@ -947,6 +962,13 @@ func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {
 		AssigneeAccountID: assignee,
 	})
 	if err != nil {
+		// Do NOT revert to "draft": a CreateIssue can fail *after* Jira already
+		// created the issue (parse error, timeout post-write). Re-filing could
+		// then make a duplicate. Park it in "file_failed" — a terminal-for-this-
+		// proposal state that neither the approval reaction nor the dashboard
+		// "file now" will re-enqueue. The Slack warning lets a human investigate
+		// and regenerate a fresh proposal if a re-file is genuinely needed.
+		e.Store.UpdateProposalStatus(p.ID, "file_failed")
 		e.Slack.PostMessage(it.SlackChannel,
 			slack.MsgOptionText(":warning: Failed to file ticket: "+err.Error(), false),
 			slack.MsgOptionTS(it.SlackTS))

@@ -15,6 +15,47 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+func TestStore_ClaimProposalForFiling_ExactlyOnce(t *testing.T) {
+	s := newTestStore(t)
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "proposed", ApprovalThreshold: 3}
+	if err := s.InsertItem(it); err != nil {
+		t.Fatalf("insert item: %v", err)
+	}
+	p := &Proposal{ItemID: it.ID, SlackTS: "1700.2", DraftJSON: "null", RelatedTicketsJSON: "[]", Branch: "new", Status: "draft"}
+	if err := s.InsertProposal(p); err != nil {
+		t.Fatalf("insert proposal: %v", err)
+	}
+
+	// First claim wins.
+	won, err := s.ClaimProposalForFiling(p.ID)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	if !won {
+		t.Fatal("first claim should win")
+	}
+	got, _ := s.GetLatestProposalByID(p.ID)
+	if got.Status != "filing" {
+		t.Fatalf("status after claim = %q, want filing", got.Status)
+	}
+
+	// Any subsequent claim loses — this is what stops a second ticket.
+	won, err = s.ClaimProposalForFiling(p.ID)
+	if err != nil {
+		t.Fatalf("second claim: %v", err)
+	}
+	if won {
+		t.Fatal("second claim must lose once proposal left draft")
+	}
+
+	// A claim on an already-filed proposal also loses.
+	s.UpdateProposalStatus(p.ID, "filed")
+	won, _ = s.ClaimProposalForFiling(p.ID)
+	if won {
+		t.Fatal("claim on filed proposal must lose")
+	}
+}
+
 func TestStore_InsertGetItem(t *testing.T) {
 	s := newTestStore(t)
 	it := &Item{

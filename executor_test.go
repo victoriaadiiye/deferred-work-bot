@@ -178,6 +178,59 @@ func TestJobExecutor_FileFlow_UnresolvedAssigneeIsObservable(t *testing.T) {
 	}
 }
 
+// countingJira wraps fakeJira to count how many issues were actually created,
+// so a test can assert a proposal never produces a second ticket.
+type countingJira struct {
+	*fakeJira
+	creates int
+}
+
+func (c *countingJira) CreateIssue(in CreateIssueInput) (*CreatedIssue, error) {
+	c.creates++
+	return c.fakeJira.CreateIssue(in)
+}
+
+// A proposal must never create two tickets. Two FileJobs get enqueued in the
+// real system (approval reaction + dashboard "file now"); when the second runs
+// after the first has filed, it must be a no-op — no second CreateIssue.
+func TestJobExecutor_FileFlow_SecondJobNeverDoubleFiles(t *testing.T) {
+	store := newTestStore(t)
+	fake := newFakeSlack("UBOT")
+	fc := &fakeClaude{resp: `{"summary":"synth summary","description":"synth desc","epic":""}`}
+	jc := &countingJira{fakeJira: &fakeJira{}}
+	it := &Item{SlackChannel: "C1", SlackTS: "1700.1", AuthorSlackID: "U1", Text: "x", Status: "proposed", ApprovalThreshold: 3}
+	store.InsertItem(it)
+	p := &Proposal{
+		ItemID:             it.ID,
+		SlackTS:            "1700.2",
+		DraftJSON:          `{"summary":"do x","description":"d","issue_type":"Task","labels":["deferred-work"],"priority":"Medium"}`,
+		RelatedTicketsJSON: "[]",
+		Branch:             "new",
+		Status:             "draft",
+	}
+	store.InsertProposal(p)
+	ex := &JobExecutor{
+		Store: store, Slack: fake, Claude: fc, Jira: jc,
+		Projects:  &ProjectsConfig{QORKProjects: []string{"QORK"}},
+		Signals:   &SignalsConfig{},
+		BotUserID: "UBOT",
+	}
+	// Both jobs target the same proposal, run back to back.
+	if err := ex.Execute(context.Background(), FileJob{ProposalID: p.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.Execute(context.Background(), FileJob{ProposalID: p.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if jc.creates != 1 {
+		t.Fatalf("CreateIssue called %d times, want exactly 1", jc.creates)
+	}
+	got, _ := store.GetItemByID(it.ID)
+	if got.Status != "ticketed" {
+		t.Fatalf("item status: %s", got.Status)
+	}
+}
+
 func TestJobExecutor_ReminderFlow_PostsReminder(t *testing.T) {
 	store := newTestStore(t)
 	fake := newFakeSlack("UBOT")

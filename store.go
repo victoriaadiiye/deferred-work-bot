@@ -298,6 +298,26 @@ func (s *Store) UpdateProposalStatus(id int64, status string) error {
 	return err
 }
 
+// ClaimProposalForFiling atomically transitions a proposal from "draft" to
+// "filing" and reports whether THIS caller won the claim. It is the single
+// serialization point that guarantees a proposal can never create two tickets:
+// two FileJobs can be enqueued for one proposal (an approval reaction and the
+// dashboard "file now" button), and with multiple workers both could otherwise
+// read status=="draft" and race into CreateIssue. The conditional UPDATE is
+// atomic in SQLite, so exactly one caller sees RowsAffected==1 and proceeds;
+// every other caller gets false and must abort before touching Jira.
+func (s *Store) ClaimProposalForFiling(id int64) (bool, error) {
+	res, err := s.db.Exec(`UPDATE proposals SET status = 'filing', updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'draft'`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // UpdateProposalSlackTS records the Slack timestamp of the posted proposal
 // message. Used when the proposal row is inserted before the message is posted
 // (so its id can be embedded in the message as a review link).
