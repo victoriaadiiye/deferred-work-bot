@@ -22,7 +22,7 @@ func TestLogs_RendersEvents(t *testing.T) {
 	if !strings.Contains(body, "Event Log") {
 		t.Fatal("missing title")
 	}
-	if !strings.Contains(body, "created") || !strings.Contains(body, "vote") {
+	if !strings.Contains(body, ">created<") || !strings.Contains(body, ">vote<") {
 		t.Fatal("missing event kinds")
 	}
 	if !strings.Contains(body, "fix flaky test") {
@@ -48,10 +48,10 @@ func TestLogs_FilterByItem(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.handler().ServeHTTP(rec, httptest.NewRequest("GET", "/logs?item_id=1", nil))
 	body := rec.Body.String()
-	if !strings.Contains(body, "created") {
+	if !strings.Contains(body, ">created<") {
 		t.Fatal("missing item 1 event")
 	}
-	if strings.Contains(body, "cancel") {
+	if strings.Contains(body, ">cancel<") {
 		t.Fatal("item 2 event should be filtered out")
 	}
 	if !strings.Contains(body, "Show all") {
