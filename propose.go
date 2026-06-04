@@ -580,8 +580,9 @@ type JobExecutor struct {
 	Jira      jiraAPI
 	Projects    *ProjectsConfig
 	Signals     *SignalsConfig
-	BotUserID   string
-	JiraBaseURL string
+	BotUserID     string
+	JiraBaseURL   string
+	PublicBaseURL string
 	// Worker lets jobs enqueue follow-up jobs — e.g. a ClassifyJob that decides a
 	// message is a proposal queues the IntakeJob for the item it creates.
 	Worker *Worker
@@ -808,21 +809,13 @@ func (e *JobExecutor) executePropose(ctx context.Context, itemID int64) error {
 		draft = d
 	}
 
-	// 6. Post proposal.
-	body := RenderProposalMessage(draft, rels, branch, existing, false, e.JiraBaseURL)
-	_, ts, err := e.Slack.PostMessage(it.SlackChannel,
-		slack.MsgOptionText(body, false),
-		slack.MsgOptionTS(it.SlackTS))
-	if err != nil {
-		return err
-	}
-
-	// 7. Persist proposal row.
+	// 6. Persist the proposal row first so its id can be embedded in the Slack
+	// message as a "review in full" link. The slack_ts is backfilled in step 8
+	// once the message is posted.
 	draftJSON, _ := json.Marshal(draft)
 	relsJSON, _ := json.Marshal(rels)
 	p := &Proposal{
 		ItemID:             it.ID,
-		SlackTS:            ts,
 		DraftJSON:          string(draftJSON),
 		RelatedTicketsJSON: string(relsJSON),
 		Branch:             branch,
@@ -833,9 +826,33 @@ func (e *JobExecutor) executePropose(ctx context.Context, itemID int64) error {
 		p.Status = "awaiting_resolution"
 	}
 	e.Store.InsertProposal(p)
+
+	// 7. Post proposal, including a link back to the full (untruncated) view.
+	body := RenderProposalMessage(draft, rels, branch, existing, false, e.JiraBaseURL)
+	if link := e.proposalReviewLink(p.ID); link != "" {
+		body += "\n\n:page_facing_up: " + link
+	}
+	_, ts, err := e.Slack.PostMessage(it.SlackChannel,
+		slack.MsgOptionText(body, false),
+		slack.MsgOptionTS(it.SlackTS))
+	if err != nil {
+		return err
+	}
+
+	// 8. Backfill the Slack timestamp and advance the item.
+	e.Store.UpdateProposalSlackTS(p.ID, ts)
 	e.Store.UpdateItemStatus(it.ID, "proposed")
 	e.Store.LogEvent(&it.ID, "proposal", `{"branch":"`+branch+`"}`)
 	return nil
+}
+
+// proposalReviewLink returns a Slack-formatted link to the dashboard's full
+// proposal view, or "" when no public base URL is configured.
+func (e *JobExecutor) proposalReviewLink(proposalID int64) string {
+	if e.PublicBaseURL == "" {
+		return ""
+	}
+	return fmt.Sprintf("<%s/proposal?id=%d|Review the full proposal>", e.PublicBaseURL, proposalID)
 }
 
 func (e *JobExecutor) executeFile(ctx context.Context, proposalID int64) error {

@@ -116,13 +116,21 @@ func (h *HealthServer) dashboard(w http.ResponseWriter, r *http.Request) {
 			subproject = "-"
 		}
 
-		// File-now skips the next approval gate: from "collecting" it forces the
-		// proposal, from "proposed" it files the drafted ticket without waiting on
-		// approval reactions. Cancelling makes sense while an item is still in
-		// flight. Terminal items (ticketed/commented/cancelled/archived) show a dash.
+		// Action buttons by stage:
+		//  collecting/proposing → "Propose" forces the bot to (re)draft a proposal.
+		//  proposed → "File now" skips the approval-reaction gate and files the draft.
+		// A "View" link opens the full, untruncated proposal once one exists.
+		// Cancelling makes sense while an item is still in flight; terminal items
+		// (ticketed/commented/cancelled/archived) show a dash.
 		var actions []string
-		if row.Status == "collecting" || row.Status == "proposed" {
+		if row.Status == "collecting" || row.Status == "proposing" {
+			actions = append(actions, fmt.Sprintf(`<form method="post" action="/propose"><input type="hidden" name="item_id" value="%d"><button class="propose-btn" type="submit">Propose</button></form>`, row.ItemID))
+		}
+		if row.Status == "proposed" {
 			actions = append(actions, fmt.Sprintf(`<form method="post" action="/file-now"><input type="hidden" name="item_id" value="%d"><button class="file-now-btn" type="submit">File now</button></form>`, row.ItemID))
+		}
+		if hasProposal(row.Status) {
+			actions = append(actions, fmt.Sprintf(`<a class="view-btn" href="/proposal?item_id=%d">View</a>`, row.ItemID))
 		}
 		if !isTerminal(row.Status) {
 			actions = append(actions, fmt.Sprintf(`<button class="cancel-btn" onclick="cancelItem(%d, this)">Cancel</button>`, row.ItemID))
@@ -180,6 +188,17 @@ function cancelItem(id, btn) {
     .catch(function() { btn.disabled = false; btn.textContent = 'Cancel'; alert('Cancel failed'); });
 }
 </script>`
+
+// hasProposal reports whether an item in this status has at least one drafted
+// proposal on record (so a "View" link can be shown). "proposing" is excluded:
+// the draft row is not written until the propose job completes.
+func hasProposal(status string) bool {
+	switch status {
+	case "proposed", "ticketed", "commented_on_existing":
+		return true
+	}
+	return false
+}
 
 // statusMatches reports whether a stored item status belongs to the given
 // dashboard status class (the short names used by the stat tiles).
@@ -265,8 +284,30 @@ const pageHead = `<!DOCTYPE html>
     padding: 4px 10px; font-size: 0.78rem; cursor: pointer; font-weight: 500;
   }
   .file-now-btn:hover { background: #2ea043; }
+  .propose-btn {
+    background: #6e40c9; color: #fff; border: none; border-radius: 6px;
+    padding: 4px 10px; font-size: 0.78rem; cursor: pointer; font-weight: 500;
+  }
+  .propose-btn:hover { background: #8957e5; }
+  .view-btn {
+    display: inline-block; border: 1px solid #30363d; color: #8b949e;
+    border-radius: 6px; padding: 3px 10px; font-size: 0.78rem;
+  }
+  .view-btn:hover { border-color: #58a6ff; color: #58a6ff; text-decoration: none; }
   .actions-cell { display: flex; gap: 6px; align-items: center; }
   .actions-cell form { display: inline; margin: 0; }
+  .prop-h { color: #e6edf3; font-size: 1.05rem; margin: 1.5rem 0 0.5rem; font-weight: 600; }
+  .prop-body {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 1rem; white-space: pre-wrap; word-wrap: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85rem;
+    color: #c9d1d9;
+  }
+  .prop-fields { width: auto; }
+  .prop-fields th { width: 130px; vertical-align: top; }
+  .prop-fields td { color: #c9d1d9; }
+  .prop-list { margin: 0.5rem 0 0 1.25rem; color: #8b949e; }
+  .prop-list li { margin: 0.2rem 0; }
   table {
     width: 100%;
     border-collapse: collapse;

@@ -29,6 +29,7 @@ type Config struct {
 	SQLitePath           string
 	HealthPort           int
 	TriggerToken         string // optional shared token for POST /trigger
+	PublicBaseURL        string // optional external URL of the dashboard, e.g. https://bot.example.com
 }
 
 func LoadConfig() (*Config, error) {
@@ -64,6 +65,7 @@ func LoadConfig() (*Config, error) {
 		SQLitePath:           defaultStr(os.Getenv("SQLITE_PATH"), "/data/state.db"),
 		HealthPort:           intEnv("HEALTH_PORT", 8080),
 		TriggerToken:         os.Getenv("TRIGGER_TOKEN"),
+		PublicBaseURL:        strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),
 	}
 	if len(c.WatchedChannels) == 0 {
 		return nil, errors.New("WATCHED_CHANNELS empty after parse")
